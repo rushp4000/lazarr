@@ -79,14 +79,19 @@ func (c *probeCache) key(hash string, fileID int) string {
 	return fmt.Sprintf("%s.%d", string(safe), fileID)
 }
 
-// readAt serves a header-region read from disk if present. Returns (n, true) on a hit.
+// readAt serves a header-region read from disk if present. A hit is all-or-nothing:
+// it returns (len(p), true) ONLY when the cached prefix fully covers [off, off+len(p)).
+// A partial cached prefix is a MISS (returns false) so the caller does a full live read
+// instead — a short count here would be forwarded to FUSE under FOPEN_DIRECT_IO and read
+// by ffprobe/Plex as a premature EOF, truncating the very header scan the cache serves.
 func (c *probeCache) readAt(hash string, fileID int, p []byte, off int64) (int, bool) {
 	k := c.key(hash, fileID)
 
 	c.mu.Lock()
 	sz, ok := c.sizes[k]
 	c.mu.Unlock()
-	if !ok || off >= sz {
+	// Require the cached region to fully cover the requested window.
+	if !ok || off < 0 || off+int64(len(p)) > sz {
 		return 0, false
 	}
 
@@ -97,13 +102,11 @@ func (c *probeCache) readAt(hash string, fileID int, p []byte, off int64) (int, 
 	defer f.Close()
 
 	n, err := f.ReadAt(p, off)
-	// ReadAt returns io.EOF when it fills less than len(p) at the tail of the cached region;
-	// that's a valid partial hit only if we actually got bytes covering the request start.
-	if n > 0 {
-		return n, true
+	if err != nil || n < len(p) {
+		// Incomplete read (truncated/corrupt cache file) -> miss; fall through to live.
+		return 0, false
 	}
-	_ = err
-	return 0, false
+	return n, true
 }
 
 // maybeStore writes the header region for a key once, bounded by the region size. body is

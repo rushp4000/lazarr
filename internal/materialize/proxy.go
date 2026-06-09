@@ -284,8 +284,17 @@ func (p *proxy) getRange(ctx context.Context, rawURL string, dst []byte, off, re
 	defer drainClose(resp.Body)
 
 	switch resp.StatusCode {
-	case http.StatusPartialContent, http.StatusOK:
-		// ok
+	case http.StatusPartialContent:
+		// 206: body begins at `off` as requested — the normal CDN path.
+	case http.StatusOK:
+		// 200: the server ignored Range and is returning the WHOLE entity from
+		// byte 0. Reading the first len(dst) bytes is only correct at off==0; for
+		// off>0 those bytes are the file START, not the requested window. Fail
+		// rather than silently corrupt a seek. (TorBox CDN returns 206; this is a
+		// guard against an anomalous server/cache.)
+		if off > 0 {
+			return 0, nil, fmt.Errorf("materialize: CDN ignored Range (HTTP 200) at offset %d", off)
+		}
 	default:
 		if isRefreshStatus(resp.StatusCode) {
 			return 0, nil, torbox.ErrLinkExpired
