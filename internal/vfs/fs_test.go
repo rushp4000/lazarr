@@ -379,6 +379,98 @@ func TestMultipleFiles_ReaddirDeterministic(t *testing.T) {
 	assert.Equal(t, []string{"alpha.mkv", "middle.mkv", "zebra.mkv"}, results[0])
 }
 
+// nestedRelease fixtures a release whose files live under a sub-directory, the
+// common "<Name>/<file>" layout TorBox returns (and exactly what the live
+// canary movie uses).  Before the nested-rel_path fix these all returned
+// ENOENT through the FUSE mount.
+func nestedRelease() (*catalog.Release, []catalog.File) {
+	rel := &catalog.Release{
+		Hash:     "dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c",
+		Name:     "Big Buck Bunny",
+		Category: "radarr_hin",
+		State:    catalog.StateVirtual,
+	}
+	files := []catalog.File{
+		{Hash: rel.Hash, FileID: 2, RelPath: "Big Buck Bunny/Big Buck Bunny.mp4", Size: 276134947},
+		{Hash: rel.Hash, FileID: 0, RelPath: "Big Buck Bunny/Big Buck Bunny.en.srt", Size: 140},
+		{Hash: rel.Hash, FileID: 1, RelPath: "Big Buck Bunny/poster.jpg", Size: 310380},
+	}
+	return rel, files
+}
+
+// TestNestedRelPath_StatAndRead asserts that a file at a nested rel_path is
+// reachable through the synthetic intermediate directory: the sub-dir lists,
+// stat returns the catalog size, and a read delegates to the Materializer with
+// the correct fileID.  This is the regression test for deferred fix #3.
+func TestNestedRelPath_StatAndRead(t *testing.T) {
+	store := newFakeStore()
+	mat := &fakeMat{}
+	rel, files := nestedRelease()
+	store.addRelease(rel, files)
+
+	mnt, _ := mountTestFS(t, store, mat)
+
+	// The intermediate dir lists under /<hash>.
+	top, err := os.ReadDir(filepath.Join(mnt, rel.Hash))
+	require.NoError(t, err)
+	require.Len(t, top, 1)
+	assert.Equal(t, "Big Buck Bunny", top[0].Name())
+	assert.True(t, top[0].IsDir(), "the rel_path prefix must appear as a directory")
+
+	// The leaves list inside the synthetic dir.
+	subDir := filepath.Join(mnt, rel.Hash, "Big Buck Bunny")
+	leaves, err := os.ReadDir(subDir)
+	require.NoError(t, err)
+	names := make([]string, 0, len(leaves))
+	for _, e := range leaves {
+		names = append(names, e.Name())
+		assert.False(t, e.IsDir())
+	}
+	assert.ElementsMatch(t, []string{"Big Buck Bunny.mp4", "Big Buck Bunny.en.srt", "poster.jpg"}, names)
+	assert.Zero(t, mat.callCount(), "listing must not materialize")
+
+	// Stat the nested .mp4 — catalog size, no Materializer call.
+	mp4 := filepath.Join(subDir, "Big Buck Bunny.mp4")
+	info, err := os.Stat(mp4)
+	require.NoError(t, err)
+	assert.Equal(t, int64(276134947), info.Size())
+	assert.Zero(t, mat.callCount(), "stat must not materialize")
+
+	// Read forwards to the Materializer with the nested file's fileID (2).
+	f, err := os.Open(mp4)
+	require.NoError(t, err)
+	defer f.Close()
+	buf := make([]byte, 64)
+	n, err := f.ReadAt(buf, 1024)
+	require.NoError(t, err)
+	assert.Equal(t, 64, n)
+
+	call, ok := mat.lastCall()
+	require.True(t, ok)
+	assert.Equal(t, rel.Hash, call.Hash)
+	assert.Equal(t, 2, call.FileID, "must resolve to the nested .mp4 (fileID 2)")
+	assert.Equal(t, int64(1024), call.Off)
+}
+
+// TestNestedRelPath_BogusPathENOENT asserts unknown components at any depth
+// still give ENOENT (negative-cache friendly) rather than resolving spuriously.
+func TestNestedRelPath_BogusPathENOENT(t *testing.T) {
+	store := newFakeStore()
+	mat := &fakeMat{}
+	rel, files := nestedRelease()
+	store.addRelease(rel, files)
+
+	mnt, _ := mountTestFS(t, store, mat)
+
+	_, err := os.Stat(filepath.Join(mnt, rel.Hash, "Big Buck Bunny", "nope.mkv"))
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, os.ErrNotExist))
+
+	_, err = os.Stat(filepath.Join(mnt, rel.Hash, "Wrong Dir", "x.mkv"))
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, os.ErrNotExist))
+}
+
 // TestStatDoesNotMaterialize_RaceDetector runs concurrent stats and verifies
 // the materializer is never called.  Run with -race to confirm there are no
 // data races.

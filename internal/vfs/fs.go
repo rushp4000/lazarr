@@ -19,6 +19,8 @@ package vfs
 import (
 	"context"
 	"log/slog"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -112,7 +114,7 @@ func (f *FS) Unmount() error {
 // FUSE node types
 // ---------------------------------------------------------------------------
 
-// rootNode is the root inode "/".  Lookup returns a hashDirNode for any hash
+// rootNode is the root inode "/".  Lookup returns a dirNode for any hash
 // that exists in the catalog; everything else is ENOENT.  Readdir lists all
 // hashes from every configured category (walking the catalog is a sequential
 // scan; it is only invoked by ls / Plex library scans, not on every read).
@@ -124,15 +126,15 @@ type rootNode struct {
 
 // Compile-time interface assertions — fail loudly if we miss a method.
 var (
-	_ fs.NodeGetattrer  = (*rootNode)(nil)
-	_ fs.NodeLookuper   = (*rootNode)(nil)
-	_ fs.NodeReaddirer  = (*rootNode)(nil)
-	_ fs.NodeGetattrer  = (*hashDirNode)(nil)
-	_ fs.NodeLookuper   = (*hashDirNode)(nil)
-	_ fs.NodeReaddirer  = (*hashDirNode)(nil)
-	_ fs.NodeGetattrer  = (*fileNode)(nil)
-	_ fs.NodeOpener     = (*fileNode)(nil)
-	_ fs.NodeReader     = (*fileNode)(nil)
+	_ fs.NodeGetattrer = (*rootNode)(nil)
+	_ fs.NodeLookuper  = (*rootNode)(nil)
+	_ fs.NodeReaddirer = (*rootNode)(nil)
+	_ fs.NodeGetattrer = (*dirNode)(nil)
+	_ fs.NodeLookuper  = (*dirNode)(nil)
+	_ fs.NodeReaddirer = (*dirNode)(nil)
+	_ fs.NodeGetattrer = (*fileNode)(nil)
+	_ fs.NodeOpener    = (*fileNode)(nil)
+	_ fs.NodeReader    = (*fileNode)(nil)
 )
 
 func (n *rootNode) Getattr(_ context.Context, _ fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
@@ -150,16 +152,16 @@ func (n *rootNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) 
 		return nil, syscall.ENOENT
 	}
 
-	child := &hashDirNode{
-		store: n.store,
-		mat:   n.mat,
-		hash:  rel.Hash,
-		files: files,
+	child := &dirNode{
+		mat:    n.mat,
+		hash:   rel.Hash,
+		prefix: "",
+		files:  files,
 	}
 
 	out.Mode = syscall.S_IFDIR | 0o555
 	out.Nlink = 2
-	stable := fs.StableAttr{Mode: syscall.S_IFDIR, Ino: hashIno(rel.Hash, 0)}
+	stable := fs.StableAttr{Mode: syscall.S_IFDIR, Ino: dirIno(rel.Hash, "")}
 	return n.NewInode(ctx, child, stable), fs.OK
 }
 
@@ -182,37 +184,57 @@ func (n *rootNode) Readdir(_ context.Context) (fs.DirStream, syscall.Errno) {
 
 // ---------------------------------------------------------------------------
 
-// hashDirNode represents "/<hash>".  Its children are fileNode instances,
-// one per catalog File.  The file list is cached at Lookup time from the
-// store so subsequent operations (Getattr, Read) do not re-query SQLite.
-type hashDirNode struct {
+// dirNode represents a directory in the virtual tree: either "/<hash>" (when
+// prefix == "") or a synthetic intermediate directory "/<hash>/<prefix>" when a
+// release's files live under sub-directories (e.g. season packs, the common
+// "<Movie Name>/<file>" layout TorBox returns).  go-fuse walks paths one
+// component at a time, so Lookup only ever sees the next single component; we
+// resolve it against the release's full file list (rel_paths are stored
+// hash-root-relative and may contain '/').  The file list is captured at
+// construction from the store so Getattr/Read never re-query SQLite.
+type dirNode struct {
 	fs.Inode
-	store catalog.Store
-	mat   Materializer
-	hash  string
-	files []catalog.File // immutable after construction
+	mat    Materializer
+	hash   string
+	prefix string         // path from the hash root to this dir ("" at the hash root)
+	files  []catalog.File // all files of the release; immutable after construction
 }
 
-func (n *hashDirNode) Getattr(_ context.Context, _ fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
+func (n *dirNode) Getattr(_ context.Context, _ fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	out.Mode = syscall.S_IFDIR | 0o555
 	out.Nlink = 2
 	return fs.OK
 }
 
-// Lookup resolves "/<hash>/<rel_path>".  rel_path may contain slashes (nested
-// dirs), but the FUSE kernel walks component-by-component: this method is only
-// ever called with the next single path component.  We match a file whose
-// RelPath equals `name` (flat layout) or whose first component equals `name`
-// (nested layout — we return a synthetic dirNode).
-//
-// Lazarr uses flat rel_paths (TorBox returns them without sub-dirs in
-// practice), so we iterate n.files and return the fileNode on exact match.
-// If the rel_path contains a '/' prefix-component we build an intermediate
-// synthetic dirNode that re-exposes the remaining files.
-func (n *hashDirNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
-	// Exact match — flat file directly under /<hash>/
+// relUnder returns the portion of relPath below prefix and whether relPath is a
+// descendant of prefix.  prefix == "" is the hash root (everything is under it).
+func relUnder(relPath, prefix string) (string, bool) {
+	if prefix == "" {
+		return relPath, true
+	}
+	if rest, ok := strings.CutPrefix(relPath, prefix+"/"); ok {
+		return rest, true
+	}
+	return "", false
+}
+
+// Lookup resolves the next path component `name` under this directory.  A file
+// whose remaining rel_path equals `name` resolves to a fileNode (the leaf); a
+// file whose remaining rel_path is `name/...` resolves to a synthetic child
+// dirNode.  Unknown names are ENOENT so the kernel caches the negative entry.
+func (n *dirNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	var childDir bool
 	for _, f := range n.files {
-		if f.RelPath == name {
+		rest, ok := relUnder(f.RelPath, n.prefix)
+		if !ok || rest == "" {
+			continue
+		}
+		head, _, nested := strings.Cut(rest, "/")
+		if head != name {
+			continue
+		}
+		if !nested {
+			// Leaf file directly under this directory.
 			child := &fileNode{
 				mat:    n.mat,
 				hash:   n.hash,
@@ -222,23 +244,61 @@ func (n *hashDirNode) Lookup(ctx context.Context, name string, out *fuse.EntryOu
 			out.Mode = syscall.S_IFREG | 0o444
 			out.Size = uint64(f.Size) //nolint:gosec — catalog size, not user-controlled
 			out.Nlink = 1
-			stable := fs.StableAttr{Mode: syscall.S_IFREG, Ino: hashIno(n.hash, f.FileID)}
+			stable := fs.StableAttr{Mode: syscall.S_IFREG, Ino: fileIno(n.hash, f.FileID)}
 			return n.NewInode(ctx, child, stable), fs.OK
 		}
+		// `name` is an intermediate directory for this file; keep scanning in
+		// case a sibling file is a leaf with the same name (files win), but
+		// remember that a directory match exists.
+		childDir = true
+	}
+	if childDir {
+		childPrefix := name
+		if n.prefix != "" {
+			childPrefix = n.prefix + "/" + name
+		}
+		child := &dirNode{mat: n.mat, hash: n.hash, prefix: childPrefix, files: n.files}
+		out.Mode = syscall.S_IFDIR | 0o555
+		out.Nlink = 2
+		stable := fs.StableAttr{Mode: syscall.S_IFDIR, Ino: dirIno(n.hash, childPrefix)}
+		return n.NewInode(ctx, child, stable), fs.OK
 	}
 	return nil, syscall.ENOENT
 }
 
-// Readdir lists the files under "/<hash>".  Consistent ordering (alphabetical
-// by RelPath) is required by go-fuse to avoid entries disappearing under
-// concurrent reads.
-func (n *hashDirNode) Readdir(_ context.Context) (fs.DirStream, syscall.Errno) {
+// Readdir lists the immediate children of this directory: leaf files directly
+// under it plus the distinct first-level sub-directory names of any nested
+// files.  Consistent (alphabetical) ordering is required by go-fuse to avoid
+// entries disappearing under concurrent reads.
+func (n *dirNode) Readdir(_ context.Context) (fs.DirStream, syscall.Errno) {
 	entries := make([]fuse.DirEntry, 0, len(n.files))
+	seenDir := make(map[string]struct{})
 	for _, f := range n.files {
+		rest, ok := relUnder(f.RelPath, n.prefix)
+		if !ok || rest == "" {
+			continue
+		}
+		head, _, nested := strings.Cut(rest, "/")
+		if nested {
+			if _, dup := seenDir[head]; dup {
+				continue
+			}
+			seenDir[head] = struct{}{}
+			childPrefix := head
+			if n.prefix != "" {
+				childPrefix = n.prefix + "/" + head
+			}
+			entries = append(entries, fuse.DirEntry{
+				Name: head,
+				Mode: syscall.S_IFDIR,
+				Ino:  dirIno(n.hash, childPrefix),
+			})
+			continue
+		}
 		entries = append(entries, fuse.DirEntry{
-			Name: f.RelPath,
+			Name: head,
 			Mode: syscall.S_IFREG,
-			Ino:  hashIno(n.hash, f.FileID),
+			Ino:  fileIno(n.hash, f.FileID),
 		})
 	}
 	// Sort for determinism (DirStream must be deterministic per go-fuse docs).
@@ -301,26 +361,28 @@ func (n *fileNode) Read(ctx context.Context, _ fs.FileHandle, dest []byte, off i
 // Helpers
 // ---------------------------------------------------------------------------
 
-// hashIno generates a stable inode number from a hash string + fileID.  The
-// inode only needs to be unique within this filesystem instance and stable for
-// the lifetime of the mount.  We use a simple FNV-style mix.
-//
-// fileID == 0 is reserved for directory inodes.
-func hashIno(hash string, fileID int) uint64 {
+// inoFromKey generates a stable inode number from an arbitrary key via an
+// FNV-1a mix.  The inode only needs to be unique within this filesystem
+// instance and stable for the lifetime of the mount.
+func inoFromKey(key string) uint64 {
 	const offset64 = 14695981039346656037
 	const prime64 = 1099511628211
 	h := uint64(offset64)
-	for i := 0; i < len(hash); i++ {
-		h ^= uint64(hash[i])
+	for i := 0; i < len(key); i++ {
+		h ^= uint64(key[i])
 		h *= prime64
 	}
-	h ^= uint64(fileID) //nolint:gosec — fileID is a small positive int from the catalog
-	h *= prime64
 	if h == 0 {
 		h = 1 // inode 0 is reserved by the kernel
 	}
 	return h
 }
+
+// fileIno and dirIno derive inode numbers in disjoint keyspaces so a file and a
+// directory can never collide (e.g. file_id 0 vs the hash root, which the old
+// scheme mapped to the same inode).
+func fileIno(hash string, fileID int) uint64 { return inoFromKey(hash + "\x00f" + strconv.Itoa(fileID)) }
+func dirIno(hash, prefix string) uint64      { return inoFromKey(hash + "\x00d" + prefix) }
 
 // sortDirEntries sorts a slice of DirEntry in-place by Name to guarantee
 // deterministic Readdir output as required by the go-fuse NodeReaddirer docs.
