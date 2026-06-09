@@ -66,8 +66,14 @@ func (f *FS) Mount() error {
 			// DirectMount avoids needing the fusermount(1) helper, which
 			// is important inside Docker where fusermount may be absent.
 			DirectMount: true,
-			FsName:      "lazarr",
-			Name:        "lazarr",
+			// AllowOther lets processes other than the mounting uid read the
+			// tree — required so Plex/the *arr suite (often a different uid)
+			// can stat and stream files, mirroring decypharr's rclone mount.
+			// Honoured here because we mount with CAP_SYS_ADMIN via DirectMount
+			// (no fusermount/`user_allow_other` in /etc/fuse.conf needed).
+			AllowOther: true,
+			FsName:     "lazarr",
+			Name:       "lazarr",
 		},
 		EntryTimeout: &sec,
 		AttrTimeout:  &sec,
