@@ -14,21 +14,56 @@ import (
 	"github.com/rushp4000/lazarr/internal/config"
 )
 
+// Privilege model (docs/05 §5): Lazarr's daemon runs as root inside the container
+// so it can mount FUSE (CAP_SYS_ADMIN is only effective for uid 0 in Docker). The
+// *arr suite, however, runs as its own uid (e.g. 1003) and must be able to move and
+// delete the import symlinks Lazarr creates — which requires those symlinks and the
+// directories Lazarr creates for them to be owned by the arr's uid:gid.
+//
+// So whenever puid/pgid are configured (> 0), Create chowns:
+//   - every NEW directory it creates under the category/name tree (os.Chown), and
+//   - every symlink it creates (os.Lchown — Lchown chowns the link itself and never
+//     follows the link into the FUSE target, which lives on the read-only FUSE mount
+//     and must never be touched).
+//
+// It deliberately does NOT chown pre-existing ancestors such as the download_dir
+// root (the operator owns those); only the directories Lazarr itself creates.
+// puid == 0 || pgid == 0 disables chown (ownership is left as-is).
+
+// chownFunc is the (path, uid, gid) chown primitive. It is a field so tests can
+// inject a recorder without needing real root; production wires os.Chown/os.Lchown.
+type chownFunc func(path string, uid, gid int) error
+
 // manager is the concrete implementation of Manager.
 type manager struct {
 	downloadDir string // abs path: arr's qBit save path root
 	fuseMount   string // abs path: FUSE virtual tree root
+
+	puid, pgid int       // 0 = chown disabled (leave ownership as-is)
+	chown      chownFunc // chowns a created directory (os.Chown)
+	lchown     chownFunc // chowns the symlink itself, never its target (os.Lchown)
 }
 
 // New returns a Manager that writes symlinks under paths.DownloadDir pointing
 // into paths.FuseMount. Both paths should be absolute; they are cleaned but
 // not validated against the filesystem — the caller must ensure they exist.
-func New(paths config.Paths) Manager {
+//
+// own carries the PUID/PGID privilege model (see the comment above): when both are
+// > 0, every directory and symlink Lazarr creates is chowned to puid:pgid so the
+// arr (running as that uid) can manage the import tree.
+func New(paths config.Paths, own config.Ownership) Manager {
 	return &manager{
 		downloadDir: filepath.Clean(paths.DownloadDir),
 		fuseMount:   filepath.Clean(paths.FuseMount),
+		puid:        own.PUID,
+		pgid:        own.PGID,
+		chown:       os.Chown,
+		lchown:      os.Lchown,
 	}
 }
+
+// chownEnabled reports whether a puid+pgid chown should be applied.
+func (m *manager) chownEnabled() bool { return m.puid > 0 && m.pgid > 0 }
 
 // Create builds the symlink tree for every file in the release.
 //
@@ -88,9 +123,13 @@ func (m *manager) Create(r *catalog.Release, files []catalog.File) error {
 //   - Correct symlink already present → no-op.
 //   - Wrong symlink present → remove and recreate.
 //   - Real file/dir present → error (refuse to clobber).
+//
+// When chown is enabled (puid/pgid > 0) every directory this call creates and the
+// symlink itself are chowned to puid:pgid so the arr can manage the import tree.
 func (m *manager) createSymlink(linkPath, target string) error {
-	// Ensure parent directory exists.
-	if err := os.MkdirAll(filepath.Dir(linkPath), 0o755); err != nil {
+	// Ensure parent directory exists. mkdirAllOwned records which directories were
+	// actually created so we only chown those (never pre-existing ancestors).
+	if err := m.mkdirAllOwned(filepath.Dir(linkPath)); err != nil {
 		return fmt.Errorf("mkdir: %w", err)
 	}
 
@@ -111,8 +150,9 @@ func (m *manager) createSymlink(linkPath, target string) error {
 			return fmt.Errorf("readlink: %w", err)
 		}
 		if current == target {
-			// Already correct — idempotent no-op.
-			return nil
+			// Already correct — idempotent no-op. Re-assert ownership so a link created
+			// before puid/pgid was configured converges on the next run (cheap, idempotent).
+			return m.lchownLink(linkPath)
 		}
 		// Wrong target — remove the stale symlink and fall through to create.
 		if err := os.Remove(linkPath); err != nil {
@@ -120,7 +160,62 @@ func (m *manager) createSymlink(linkPath, target string) error {
 		}
 	}
 
-	return os.Symlink(target, linkPath)
+	if err := os.Symlink(target, linkPath); err != nil {
+		return err
+	}
+	return m.lchownLink(linkPath)
+}
+
+// mkdirAllOwned is os.MkdirAll plus chown of every directory it creates (and only
+// those) to puid:pgid when chown is enabled. It walks up from dir collecting the
+// missing ancestors (deepest path that does not yet exist), creates the tree, then
+// chowns the freshly created directories top-down. Pre-existing ancestors — e.g.
+// the download_dir root the operator owns — are never chowned.
+func (m *manager) mkdirAllOwned(dir string) error {
+	if !m.chownEnabled() {
+		return os.MkdirAll(dir, 0o755)
+	}
+
+	// Collect the chain of not-yet-existing directories from dir upward, stopping at
+	// the first existing ancestor.
+	var created []string
+	for p := dir; ; p = filepath.Dir(p) {
+		if _, err := os.Lstat(p); err == nil {
+			break // exists -> stop; everything above also exists
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+		created = append(created, p)
+		if parent := filepath.Dir(p); parent == p {
+			break // reached filesystem root
+		}
+	}
+
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+
+	// Chown the directories we created. Order does not matter for chown; we skip any
+	// that vanished (best-effort, but surface real errors).
+	for _, p := range created {
+		if err := m.chown(p, m.puid, m.pgid); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("chown dir %q: %w", p, err)
+		}
+	}
+	return nil
+}
+
+// lchownLink chowns a symlink itself (never its target) to puid:pgid when chown is
+// enabled. It uses Lchown so it cannot follow the link into the read-only FUSE
+// target. A no-op when chown is disabled.
+func (m *manager) lchownLink(linkPath string) error {
+	if !m.chownEnabled() {
+		return nil
+	}
+	if err := m.lchown(linkPath, m.puid, m.pgid); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("lchown symlink %q: %w", linkPath, err)
+	}
+	return nil
 }
 
 // Remove deletes all symlinks whose target resolves under <FuseMount>/<hash>/,

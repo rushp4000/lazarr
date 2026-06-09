@@ -73,7 +73,7 @@ func main() {
 			"long_term_storage", acct.LongTermStore, "cooldown_until", acct.CooldownUntil)
 	}
 
-	sym := symlink.New(cfg.Paths)
+	sym := symlink.New(cfg.Paths, cfg.Ownership)
 
 	qsrv := qbit.New(qbit.Deps{Config: cfg, Store: store, TorBox: tb, Symlink: sym})
 
@@ -118,6 +118,12 @@ func main() {
 		_ = eng.Close()
 		os.Exit(1)
 	}
+
+	// Broken-mount guard (CRITICAL): the reapers call Release -> ControlDelete. If the
+	// FUSE mount goes unhealthy on a transient blip the reapers must NOT mass-delete from
+	// the TorBox account. Hand the engine a cheap mount-health probe; the reapers skip a
+	// sweep (logging a Warn) whenever it reports unhealthy.
+	eng.SetMountHealthy(fsys.Healthy)
 
 	// ToS-audit loop: periodic proof that the account holds nothing we believe is
 	// released (scoped to Lazarr-added ids while it coexists with decypharr).

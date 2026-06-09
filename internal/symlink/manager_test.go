@@ -22,7 +22,7 @@ func newManager(t *testing.T) (symlink.Manager, string, string) {
 	m := symlink.New(config.Paths{
 		DownloadDir: downloadDir,
 		FuseMount:   fuseMount,
-	})
+	}, config.Ownership{})
 	return m, downloadDir, fuseMount
 }
 
