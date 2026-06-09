@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 
 	// Register modernc pure-Go SQLite driver (CGO_ENABLED=0 safe).
 	_ "modernc.org/sqlite"
@@ -286,6 +287,66 @@ func (s *sqliteStore) ListByCategory(category string) ([]*Release, error) {
 		return nil, fmt.Errorf("catalog: iterate releases: %w", err)
 	}
 	return releases, nil
+}
+
+const defaultListLimit = 50
+
+// ListReleases returns releases matching f with the total matching count. Used by
+// the Web UI table; supports text search, state/category filters, and pagination.
+func (s *sqliteStore) ListReleases(f ReleaseFilter) ([]*Release, int, error) {
+	if f.Limit <= 0 {
+		f.Limit = defaultListLimit
+	}
+
+	// Build WHERE predicates. We use LIKE for the q search so it works without
+	// loading extensions; case sensitivity is acceptable for hashes.
+	var where []string
+	var args []any
+	if f.Q != "" {
+		pat := "%" + f.Q + "%"
+		where = append(where, "(name LIKE ? OR hash LIKE ?)")
+		args = append(args, pat, pat)
+	}
+	if f.State != "" {
+		where = append(where, "state = ?")
+		args = append(args, string(f.State))
+	}
+	if f.Category != "" {
+		where = append(where, "category = ?")
+		args = append(args, f.Category)
+	}
+
+	clause := ""
+	if len(where) > 0 {
+		clause = "WHERE " + strings.Join(where, " AND ")
+	}
+
+	// Total count.
+	var total int
+	if err := s.db.QueryRow(
+		"SELECT COUNT(*) FROM release "+clause, args...,
+	).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("catalog: list releases count: %w", err)
+	}
+
+	// Paginated rows, newest-grabbed first.
+	rows, err := s.db.Query(
+		`SELECT hash, name, category, magnet, total_size, state, cached,
+		        torbox_id, added_on, last_access, materialized_at, created_at
+		 FROM release `+clause+`
+		 ORDER BY added_on DESC
+		 LIMIT ? OFFSET ?`,
+		append(args, f.Limit, f.Offset)...,
+	)
+	if err != nil {
+		return nil, 0, fmt.Errorf("catalog: list releases: %w", err)
+	}
+	defer rows.Close()
+	rels, err := collectReleases(rows)
+	if err != nil {
+		return nil, 0, err
+	}
+	return rels, total, nil
 }
 
 // SetState updates a release's state and torbox_id. Per the spec, torbox_id

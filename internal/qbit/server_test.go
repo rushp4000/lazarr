@@ -90,6 +90,9 @@ func (f *fakeStore) TouchAccess(hash string, ts int64) error {
 
 func (f *fakeStore) IdleCandidates(before int64) ([]*catalog.Release, error)  { return nil, nil }
 func (f *fakeStore) OverMaxHold(before int64) ([]*catalog.Release, error)     { return nil, nil }
+func (f *fakeStore) ListReleases(_ catalog.ReleaseFilter) ([]*catalog.Release, int, error) {
+	return nil, 0, nil
+}
 func (f *fakeStore) MaterializedIDs() ([]int64, error)                        { return nil, nil }
 func (f *fakeStore) MaterializedReleases() ([]*catalog.Release, error)        { return nil, nil }
 func (f *fakeStore) GetLink(hash string, fileID int) (*catalog.DLLink, error) { return nil, nil }

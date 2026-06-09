@@ -21,6 +21,7 @@ services:
     ports:
       - "8080:8080"        # qBittorrent API the arrs point at
       - "9090:9090"        # OPTIONAL metrics/health; only if metrics.listen is set
+      - "8081:8081"        # OPTIONAL web UI; only if webui.listen is set
 
     volumes:
       - ./config:/config   # config.yaml + lazarr.sqlite (+ probe cache)

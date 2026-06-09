@@ -589,3 +589,91 @@ func TestErrNotFoundSentinel(t *testing.T) {
 		assert.True(t, errors.Is(err, ErrNotFound))
 	})
 }
+
+// ---- ListReleases -----------------------------------------------------------
+
+func TestListReleases_All(t *testing.T) {
+	s := openTestDB(t)
+	hashes := []string{
+		"list0000000000000000000000000000000001",
+		"list0000000000000000000000000000000002",
+		"list0000000000000000000000000000000003",
+	}
+	for i, h := range hashes {
+		r := sampleRelease(h)
+		r.Name = "Movie " + string(rune('A'+i))
+		require.NoError(t, s.UpsertRelease(r, nil))
+	}
+
+	got, total, err := s.ListReleases(ReleaseFilter{})
+	require.NoError(t, err)
+	assert.Equal(t, 3, total)
+	assert.Len(t, got, 3)
+}
+
+func TestListReleases_QueryFilter(t *testing.T) {
+	s := openTestDB(t)
+	r1 := sampleRelease("listq000000000000000000000000000000001")
+	r1.Name = "Big Buck Bunny"
+	r2 := sampleRelease("listq000000000000000000000000000000002")
+	r2.Name = "Elephants Dream"
+	require.NoError(t, s.UpsertRelease(r1, nil))
+	require.NoError(t, s.UpsertRelease(r2, nil))
+
+	got, total, err := s.ListReleases(ReleaseFilter{Q: "buck"})
+	require.NoError(t, err)
+	assert.Equal(t, 1, total)
+	require.Len(t, got, 1)
+	assert.Equal(t, "Big Buck Bunny", got[0].Name)
+}
+
+func TestListReleases_StateFilter(t *testing.T) {
+	s := openTestDB(t)
+	rv := sampleRelease("lists000000000000000000000000000000001")
+	require.NoError(t, s.UpsertRelease(rv, nil)) // virtual (default)
+	rm := sampleRelease("lists000000000000000000000000000000002")
+	require.NoError(t, s.UpsertRelease(rm, nil))
+	require.NoError(t, s.SetState(rm.Hash, StateMaterialized, 999))
+
+	got, total, err := s.ListReleases(ReleaseFilter{State: StateMaterialized})
+	require.NoError(t, err)
+	assert.Equal(t, 1, total)
+	require.Len(t, got, 1)
+	assert.Equal(t, StateMaterialized, got[0].State)
+}
+
+func TestListReleases_CategoryFilter(t *testing.T) {
+	s := openTestDB(t)
+	r1 := sampleRelease("listc000000000000000000000000000000001")
+	r1.Category = "sonarr_hd"
+	r2 := sampleRelease("listc000000000000000000000000000000002")
+	r2.Category = "radarr_hin"
+	require.NoError(t, s.UpsertRelease(r1, nil))
+	require.NoError(t, s.UpsertRelease(r2, nil))
+
+	got, total, err := s.ListReleases(ReleaseFilter{Category: "sonarr_hd"})
+	require.NoError(t, err)
+	assert.Equal(t, 1, total)
+	require.Len(t, got, 1)
+	assert.Equal(t, "sonarr_hd", got[0].Category)
+}
+
+func TestListReleases_Pagination(t *testing.T) {
+	s := openTestDB(t)
+	for i := 0; i < 5; i++ {
+		r := sampleRelease("listp" + string(rune('0'+i)) + "000000000000000000000000000000001")
+		require.NoError(t, s.UpsertRelease(r, nil))
+	}
+
+	// page 1
+	got, total, err := s.ListReleases(ReleaseFilter{Limit: 3, Offset: 0})
+	require.NoError(t, err)
+	assert.Equal(t, 5, total)
+	assert.Len(t, got, 3)
+
+	// page 2
+	got2, total2, err := s.ListReleases(ReleaseFilter{Limit: 3, Offset: 3})
+	require.NoError(t, err)
+	assert.Equal(t, 5, total2)
+	assert.Len(t, got2, 2)
+}

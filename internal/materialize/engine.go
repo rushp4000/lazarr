@@ -201,6 +201,33 @@ func (m *materializer) SlotsInUse() int      { return len(m.slots) }
 func (m *materializer) SlotsTotal() int      { return cap(m.slots) }
 func (m *materializer) LastAuditUnix() int64 { return m.lastAudit.Load() }
 
+// MaterializedEntry is a snapshot of one live in-memory materialized release.
+// Exported for the Web UI; not in the frozen Engine interface.
+type MaterializedEntry struct {
+	Hash       string
+	TorBoxID   int64
+	Refs       int
+	LastUsedNs int64 // unix nanoseconds of last access
+}
+
+// MaterializedSnapshot returns a point-in-time copy of the live materialized set.
+// Safe for concurrent use; the returned slice is a stable snapshot, not a live view.
+// Not in the frozen Engine interface; called on the concrete *materializer from main.
+func (m *materializer) MaterializedSnapshot() []MaterializedEntry {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]MaterializedEntry, 0, len(m.track))
+	for hash, ent := range m.track {
+		out = append(out, MaterializedEntry{
+			Hash:       hash,
+			TorBoxID:   ent.torboxID,
+			Refs:       ent.refs,
+			LastUsedNs: ent.lastUsed,
+		})
+	}
+	return out
+}
+
 // Start launches the idle and max-hold reapers. Non-blocking; idempotent. The reapers stop
 // on ctx cancel or on Close (whichever comes first), and are awaited by Close — no leaks.
 func (m *materializer) Start(ctx context.Context) {

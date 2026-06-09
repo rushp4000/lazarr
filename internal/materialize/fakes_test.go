@@ -133,6 +133,10 @@ func (s *fakeStore) OverMaxHold(before int64) ([]*catalog.Release, error) {
 	return out, nil
 }
 
+func (s *fakeStore) ListReleases(_ catalog.ReleaseFilter) ([]*catalog.Release, int, error) {
+	return nil, 0, nil
+}
+
 func (s *fakeStore) MaterializedIDs() ([]int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

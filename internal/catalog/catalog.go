@@ -49,11 +49,22 @@ type DLLink struct {
 	ExpiresAt int64
 }
 
+// ReleaseFilter is the query for ListReleases (Web UI table).
+type ReleaseFilter struct {
+	Q        string // substring match on name or hash (case-insensitive); empty = all
+	State    State  // empty = all states
+	Category string // empty = all categories
+	Limit    int    // 0 → default (50)
+	Offset   int
+}
+
 // Store is the catalog contract. All timestamps are unix seconds.
 type Store interface {
 	UpsertRelease(r *Release, files []File) error
 	GetRelease(hash string) (*Release, []File, error)
 	ListByCategory(category string) ([]*Release, error)
+	// ListReleases returns releases matching f with a total count (for pagination).
+	ListReleases(f ReleaseFilter) ([]*Release, int, error)
 	SetState(hash string, st State, torboxID int64) error
 	TouchAccess(hash string, ts int64) error
 	// IdleCandidates returns materialized releases whose LastAccess is before ts.

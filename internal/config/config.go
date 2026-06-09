@@ -79,6 +79,18 @@ type Metrics struct {
 	Listen string `yaml:"listen"` // e.g. ":9090"; empty = admin server disabled
 }
 
+// WebUI configures the OPT-IN human dashboard. It is disabled by default (empty
+// Listen). When set it serves the Lazarr Web UI on a SEPARATE listener, kept off
+// the arr-facing qbit port. It is unauthenticated by default (trusted-LAN model,
+// like the qbit and metrics ports). Set Username + Password to enable HTTP Basic
+// Auth, which is recommended because the UI exposes more context and includes
+// mutating actions (force-release, run-audit).
+type WebUI struct {
+	Listen   string `yaml:"listen"`   // e.g. ":8081"; empty = web UI disabled
+	Username string `yaml:"username"` // optional basic-auth username
+	Password string `yaml:"password"` // optional basic-auth password
+}
+
 type Config struct {
 	TorBox     TorBox    `yaml:"torbox"`
 	QBit       QBit      `yaml:"qbit"`
@@ -87,6 +99,7 @@ type Config struct {
 	Policy     Policy    `yaml:"policy"`
 	Ownership  Ownership `yaml:"ownership"`
 	Metrics    Metrics   `yaml:"metrics"`
+	WebUI      WebUI     `yaml:"webui"`
 }
 
 // Default returns a Config pre-populated with sane defaults; YAML overlays it.
@@ -163,6 +176,18 @@ func (c *Config) validate() error {
 	}
 	if c.Ownership.PGID < 0 {
 		return fmt.Errorf("pgid (%d) must be >= 0 (0 = disabled)", c.Ownership.PGID)
+	}
+	// (d2/S5) chown needs BOTH puid and pgid: chownEnabled() requires both > 0, so setting
+	// exactly one silently disables chown and produces the "arr can't move/import" failure
+	// docs/20 §9 troubleshoots. Reject the half-set config with a clear, named error.
+	if (c.Ownership.PUID > 0) != (c.Ownership.PGID > 0) {
+		return fmt.Errorf("ownership.puid (%d) and ownership.pgid (%d) must both be set (>0) or both be 0 (chown disabled)",
+			c.Ownership.PUID, c.Ownership.PGID)
+	}
+
+	// (e) webui basic auth: both username AND password must be set, or neither.
+	if (c.WebUI.Username == "") != (c.WebUI.Password == "") {
+		return fmt.Errorf("webui.username and webui.password must both be set or both be empty")
 	}
 
 	return nil
