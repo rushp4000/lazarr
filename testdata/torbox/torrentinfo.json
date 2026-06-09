@@ -1,0 +1,26 @@
+{
+  "success": true,
+  "detail": "Successfully got torrent info.",
+  "data": {
+    "name": "Sintel (2010) [1080p]",
+    "hash": "08ada5a7a6183aae1e09d831df6748d566095a10",
+    "size": 1136785408,
+    "files": [
+      {
+        "id": 0,
+        "name": "Sintel (2010) [1080p]/Sintel.2010.1080p.mkv",
+        "size": 1136766000
+      },
+      {
+        "id": 1,
+        "name": "Sintel (2010) [1080p]/Sintel.2010.1080p.en.srt",
+        "size": 19279
+      },
+      {
+        "id": 2,
+        "name": "Sintel (2010) [1080p]/movie.nfo",
+        "size": 129
+      }
+    ]
+  }
+}

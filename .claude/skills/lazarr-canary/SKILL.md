@@ -24,8 +24,13 @@ repoint radarr_hin's download client back to decypharr (`:8282`).
 - Plex: add the radarr_hin symlink dir as a test library path; deep analysis already
   globally disabled — leave it.
 
+## Canary movie (chosen)
+**Big Buck Bunny (2008), tmdbId 10378, imdbId tt1254207** — public-domain, verified
+TorBox-cached (hash `dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c`). Backup: **Sintel
+(tmdbId 45745)**. radarr_hin profile **Any (id 1)**, root **/movies**.
+
 ## Phase 1 check (grab → import, no materialize)
-1. In radarr_hin, search+grab one **well-seeded, TorBox-cached** movie.
+1. In radarr_hin, add Big Buck Bunny (profile Any, root /movies) and search+grab.
 2. Assert: Lazarr logs a `checkcached` hit with a real size; symlink appears; radarr_hin
    imports into the library.
 3. **ToS assertion:** TorBox `mylist` count is **unchanged** before vs after the grab

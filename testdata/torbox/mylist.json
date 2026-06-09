@@ -1,0 +1,48 @@
+{
+  "success": true,
+  "detail": "Successfully retrieved torrent list.",
+  "data": [
+    {
+      "id": 7654321,
+      "hash": "dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c",
+      "name": "Big Buck Bunny (2008) [1080p]",
+      "size": 691087437,
+      "download_state": "completed",
+      "download_finished": true,
+      "active": false,
+      "files": [
+        {
+          "id": 0,
+          "name": "Big Buck Bunny (2008) [1080p]/Big.Buck.Bunny.2008.1080p.mp4",
+          "size": 691069000
+        },
+        {
+          "id": 1,
+          "name": "Big Buck Bunny (2008) [1080p]/Big.Buck.Bunny.2008.1080p.en.srt",
+          "size": 18308
+        },
+        {
+          "id": 2,
+          "name": "Big Buck Bunny (2008) [1080p]/movie.nfo",
+          "size": 129
+        }
+      ]
+    },
+    {
+      "id": 7654322,
+      "hash": "08ada5a7a6183aae1e09d831df6748d566095a10",
+      "name": "Sintel (2010) [1080p]",
+      "size": 1136785408,
+      "download_state": "downloading",
+      "download_finished": false,
+      "active": true,
+      "files": [
+        {
+          "id": 0,
+          "name": "Sintel (2010) [1080p]/Sintel.2010.1080p.mkv",
+          "size": 1136766000
+        }
+      ]
+    }
+  ]
+}

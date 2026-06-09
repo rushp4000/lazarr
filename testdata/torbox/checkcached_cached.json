@@ -1,0 +1,28 @@
+{
+  "success": true,
+  "detail": "Successfully checked cache.",
+  "data": {
+    "dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c": {
+      "name": "Big Buck Bunny (2008) [1080p]",
+      "size": 691087437,
+      "hash": "dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c",
+      "files": [
+        {
+          "id": 0,
+          "name": "Big Buck Bunny (2008) [1080p]/Big.Buck.Bunny.2008.1080p.mp4",
+          "size": 691069000
+        },
+        {
+          "id": 1,
+          "name": "Big Buck Bunny (2008) [1080p]/Big.Buck.Bunny.2008.1080p.en.srt",
+          "size": 18308
+        },
+        {
+          "id": 2,
+          "name": "Big Buck Bunny (2008) [1080p]/movie.nfo",
+          "size": 129
+        }
+      ]
+    }
+  }
+}

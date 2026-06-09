@@ -1,0 +1,16 @@
+{
+  "success": true,
+  "detail": "Successfully retrieved user data.",
+  "data": {
+    "id": 169538,
+    "email": "sushi14921776@gmail.com",
+    "plan": 1,
+    "is_subscribed": true,
+    "additional_concurrent_slots": 0,
+    "long_term_storage": false,
+    "long_term_seeding": false,
+    "cooldown_until": "2026-06-10T01:08:06Z",
+    "total_downloaded": 25,
+    "server": 1
+  }
+}
