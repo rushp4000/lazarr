@@ -56,8 +56,7 @@ type materializer struct {
 	policy config.Policy
 	log    *slog.Logger
 
-	readahead int64
-	probe     *probeCache // nil if disabled / unwritable
+	probe *probeCache // nil if disabled / unwritable
 
 	prox *proxy // SSRF-safe range proxy
 
@@ -122,21 +121,15 @@ func New(d Deps) (*materializer, error) {
 		return nil, errors.New("materialize: nil TorBox")
 	}
 
-	readahead := d.Readahead
-	if readahead <= 0 {
-		readahead = constants.DefaultReadahead
-	}
-
 	m := &materializer{
-		store:     d.Store,
-		tb:        d.TorBox,
-		policy:    d.Policy,
-		log:       slog.Default(),
-		readahead: readahead,
-		now:       time.Now,
-		track:     make(map[string]*entry),
-		seen:      make(map[int64]struct{}),
-		prox:      newProxy(),
+		store:  d.Store,
+		tb:     d.TorBox,
+		policy: d.Policy,
+		log:    slog.Default(),
+		now:    time.Now,
+		track:  make(map[string]*entry),
+		seen:   make(map[int64]struct{}),
+		prox:   newProxy(),
 	}
 
 	// Resolve the active-slot budget: explicit policy > UserMe() > DefaultActiveSlots.

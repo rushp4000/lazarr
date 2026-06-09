@@ -104,7 +104,6 @@ func main() {
 		TorBox:        tb,
 		Policy:        cfg.Policy,
 		ProbeCacheDir: cfg.Paths.ProbeCacheDir,
-		// Readahead 0 => constants.DefaultReadahead (8 MiB).
 	})
 	if err != nil {
 		slog.Error("materialize engine", "err", err)

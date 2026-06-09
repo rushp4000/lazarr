@@ -20,11 +20,11 @@ type Deps struct {
 	// ProbeCacheDir is a bounded on-disk dir for cached file-header regions, so Plex
 	// header scans of freshly imported items don't trigger a fresh TorBox add. Required
 	// when Policy.ProbeCache is true.
+	//
+	// Reaper interval, link-refresh statuses, and the createtorrent budget are read from
+	// internal/constants (not tunable here). Each read fetches exactly its window — there
+	// is no readahead widening (it only wasted CDN bandwidth; see proxy.getRange).
 	ProbeCacheDir string
-	// Readahead caps how far past the requested window the proxy may fetch, in bytes.
-	// 0 => constants.DefaultReadahead (8 MiB). Reaper interval, link-refresh statuses,
-	// and the createtorrent budget are read from internal/constants (not tunable here).
-	Readahead int64
 }
 
 // Engine is the concrete materializer (built by Agent M). It must satisfy

@@ -21,7 +21,7 @@ import (
 // *.tb-cdn.io host (observed: nexus-138.snam.tb-cdn.io). Verified live (docs/08 + docs/11).
 const cdnHostSuffix = ".tb-cdn.io"
 
-// proxyTimeouts: a single header-region / range read is small (<= window + readahead), so
+// proxyTimeouts: a single header-region / range read is small (one window), so
 // generous-but-bounded timeouts suffice and protect against slowloris-style stalls.
 const (
 	proxyDialTimeout    = 10 * time.Second
@@ -186,7 +186,7 @@ func (m *materializer) proxyRead(ctx context.Context, ent *entry, fileID int, p 
 		return 0, nil, err
 	}
 
-	n, body, err := m.prox.getRange(ctx, link.URL, p, off, m.readahead, m.probe != nil)
+	n, body, err := m.prox.getRange(ctx, link.URL, p, off, m.probe != nil)
 	if err == nil {
 		return n, body, nil
 	}
@@ -199,7 +199,7 @@ func (m *materializer) proxyRead(ctx context.Context, ent *entry, fileID int, p 
 		if rerr != nil {
 			return 0, nil, rerr
 		}
-		n, body, err = m.prox.getRange(ctx, link.URL, p, off, m.readahead, m.probe != nil)
+		n, body, err = m.prox.getRange(ctx, link.URL, p, off, m.probe != nil)
 		if err != nil {
 			// A second expiry (or any error) does NOT loop — surface it.
 			return 0, nil, fmt.Errorf("materialize: range read after refresh %s: %w", short(ent.hash), err)
@@ -247,13 +247,17 @@ func (m *materializer) nearExpiry(l *catalog.DLLink) bool {
 	return m.now().Unix()+skew >= l.ExpiresAt
 }
 
+// NOTE: each getRange fetches EXACTLY its requested window — there is no readahead
+// widening. An earlier design asked the CDN for window+readahead bytes, but with no
+// prefetch buffer those extra bytes were drained and discarded: pure wasted TorBox
+// bandwidth (which counts against the rolling-bandwidth ToS budget) for zero benefit.
+// Sequential reads already arrive as back-to-back windows from the kernel.
+//
 // getRange performs the SSRF-safe ranged GET. It validates the URL (host-pin/scheme/IP)
 // BEFORE issuing the request, sends Range: bytes=off-(off+len-1), and copies exactly the
 // requested window into p. wantBody==true returns the read bytes for the probe cache.
-//
-// readahead bounds how far past the window the CDN MAY send (we ask for window+readahead
-// but only ever fill p). On a 4xx in LinkRefreshStatuses it returns torbox.ErrLinkExpired.
-func (p *proxy) getRange(ctx context.Context, rawURL string, dst []byte, off, readahead int64, wantBody bool) (int, []byte, error) {
+// On a 4xx in LinkRefreshStatuses it returns torbox.ErrLinkExpired.
+func (p *proxy) getRange(ctx context.Context, rawURL string, dst []byte, off int64, wantBody bool) (int, []byte, error) {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return 0, nil, fmt.Errorf("%w: unparseable url", errSSRFBlocked)
@@ -265,13 +269,8 @@ func (p *proxy) getRange(ctx context.Context, rawURL string, dst []byte, off, re
 	}
 
 	want := int64(len(dst))
-	// Ask for the window plus the bounded readahead; the server may send less (it caps at
-	// EOF). We never read more than `want` bytes into dst, so readahead only smooths the
-	// underlying TCP/HTTP fetch, never the bytes we surface or store.
-	last := off + want + readahead - 1
-	if last < off {
-		last = off + want - 1 // overflow guard
-	}
+	// Fetch exactly the requested window: bytes=off-(off+want-1). The server caps at EOF.
+	last := off + want - 1
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {

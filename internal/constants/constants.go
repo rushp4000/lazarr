@@ -30,7 +30,6 @@ var (
 	DefaultIdleTTL      = 15 * time.Minute
 	DefaultMaxHold      = 24 * time.Hour
 	DefaultReaperEvery  = 30 * time.Second
-	DefaultReadahead    = int64(8 << 20) // 8 MiB
 	DefaultActiveSlots  = EssentialActiveSlots
 	LinkRefreshStatuses = []int{400, 403, 410} // re-request presigned URL then retry
 )
