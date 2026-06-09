@@ -17,3 +17,6 @@
 .DS_Store
 .idea/
 .vscode/
+
+# agent worktrees (transient)
+.claude/worktrees/

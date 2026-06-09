@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sync/singleflight"
@@ -24,6 +25,7 @@ import (
 	"github.com/rushp4000/lazarr/internal/catalog"
 	"github.com/rushp4000/lazarr/internal/config"
 	"github.com/rushp4000/lazarr/internal/constants"
+	"github.com/rushp4000/lazarr/internal/metrics"
 	"github.com/rushp4000/lazarr/internal/torbox"
 )
 
@@ -76,6 +78,10 @@ type materializer struct {
 	idleSignal chan struct{}
 
 	now nowFunc
+
+	// lastAudit is the unix time of the last completed ToS audit (0 = never). Reported by
+	// the admin /health endpoint. Atomic: written by the audit loop, read by /health.
+	lastAudit atomic.Int64
 
 	// sf dedupes concurrent first-materialize per hash so exactly one CreateTorrent runs.
 	sf singleflight.Group
@@ -184,6 +190,13 @@ func (m *materializer) mountIsHealthy() bool {
 // slotCap reports the configured active-slot budget.
 func (m *materializer) slotCap() int { return cap(m.slots) }
 
+// SlotsInUse and SlotsTotal report the live and total active-materialize slots; LastAuditUnix
+// is the unix time of the last completed ToS audit (0 = never). These feed the admin /health
+// endpoint and are not part of the frozen Engine interface (called on the concrete type).
+func (m *materializer) SlotsInUse() int      { return len(m.slots) }
+func (m *materializer) SlotsTotal() int      { return cap(m.slots) }
+func (m *materializer) LastAuditUnix() int64 { return m.lastAudit.Load() }
+
 // Start launches the idle and max-hold reapers. Non-blocking; idempotent. The reapers stop
 // on ctx cancel or on Close (whichever comes first), and are awaited by Close — no leaks.
 func (m *materializer) Start(ctx context.Context) {
@@ -260,8 +273,10 @@ func (m *materializer) ReadAt(hash string, fileID int, p []byte, off int64) (int
 	// the add already happened above). Falls through to live proxy on a miss.
 	if m.probe != nil && m.probe.covers(off, int64(len(p))) {
 		if n, ok := m.probe.readAt(hash, fileID, p, off); ok {
+			metrics.IncProbeHit()
 			return n, nil
 		}
+		metrics.IncProbeMiss()
 	}
 
 	// 3+4. Resolve a fresh link and range-proxy the window (with one refresh-on-4xx retry).
@@ -372,6 +387,7 @@ func (m *materializer) materialize(ctx context.Context, hash string) (*entry, er
 		switch {
 		case errors.Is(err, torbox.ErrRateLimited):
 			// Do NOT spin/retry — surface a clear, wrapped error for the caller to back off.
+			metrics.IncCreateRateLimited()
 			return nil, fmt.Errorf("materialize: createtorrent rate limited for %s: %w", short(hash), err)
 		case errors.Is(err, torbox.ErrNotFound):
 			// Dead-cache: TorBox purged this item, so it can never materialize. Mark it
@@ -396,6 +412,7 @@ func (m *materializer) materialize(ctx context.Context, hash string) (*entry, er
 	}
 
 	m.log.Info("materialized", "hash", short(hash), "torbox_id", id)
+	metrics.IncMaterializes()
 	return m.register(hash, id), nil
 }
 
@@ -409,6 +426,7 @@ func (m *materializer) register(hash string, id int64) *entry {
 	if id != 0 {
 		m.seen[id] = struct{}{} // remember for the ToS audit scope
 	}
+	metrics.SetMaterializedCount(len(m.track))
 	return ent
 }
 
@@ -450,6 +468,7 @@ func (m *materializer) admit(ctx context.Context, incoming string) error {
 		// Try to acquire without evicting.
 		select {
 		case m.slots <- struct{}{}:
+			metrics.SetSlotsInUse(len(m.slots))
 			return nil
 		case <-ctx.Done():
 			return fmt.Errorf("materialize: admit %s: %w", short(incoming), ctx.Err())
@@ -468,6 +487,7 @@ func (m *materializer) admit(ctx context.Context, incoming string) error {
 		// or for an idle signal indicating a release became evictable, then re-evaluate.
 		select {
 		case m.slots <- struct{}{}:
+			metrics.SetSlotsInUse(len(m.slots))
 			return nil
 		case <-m.idleSignal:
 			// A release went idle; loop to attempt eviction.
@@ -506,6 +526,7 @@ func (m *materializer) releaseSlot() {
 		// bookkeeping bug; we log rather than panic in production.
 		m.log.Warn("materialize: releaseSlot with empty semaphore (bug)")
 	}
+	metrics.SetSlotsInUse(len(m.slots))
 	m.notifyIdle()
 }
 
@@ -528,6 +549,7 @@ func (m *materializer) Release(hash string) error {
 	// cleanly instead of racing on a half-torn-down entry.
 	delete(m.track, hash)
 	id := ent.torboxID
+	metrics.SetMaterializedCount(len(m.track))
 	m.mu.Unlock()
 
 	// Network + persistence happen OUTSIDE the lock.
@@ -544,6 +566,7 @@ func (m *materializer) Release(hash string) error {
 	// Free the slot this release was holding.
 	m.releaseSlot()
 	if err == nil {
+		metrics.IncReleases()
 		m.log.Info("released", "hash", short(hash), "torbox_id", id)
 	}
 	return err

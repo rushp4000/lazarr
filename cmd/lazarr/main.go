@@ -21,9 +21,11 @@ import (
 	"github.com/rushp4000/lazarr/internal/catalog"
 	"github.com/rushp4000/lazarr/internal/config"
 	"github.com/rushp4000/lazarr/internal/materialize"
+	"github.com/rushp4000/lazarr/internal/metrics"
 	"github.com/rushp4000/lazarr/internal/qbit"
 	"github.com/rushp4000/lazarr/internal/symlink"
 	"github.com/rushp4000/lazarr/internal/torbox"
+	"github.com/rushp4000/lazarr/internal/version"
 	"github.com/rushp4000/lazarr/internal/vfs"
 )
 
@@ -125,6 +127,28 @@ func main() {
 	// sweep (logging a Warn) whenever it reports unhealthy.
 	eng.SetMountHealthy(fsys.Healthy)
 
+	// Observability admin server (opt-in, separate port): /metrics (Prometheus) + /health
+	// (JSON). Disabled when metrics.listen is empty. Kept off the arr-facing qbit port; like
+	// the qbit listener it is unauthenticated, so bind it to the trusted LAN.
+	var adminSrv *http.Server
+	if cfg.Metrics.Listen != "" {
+		mux := http.NewServeMux()
+		mux.Handle("/metrics", metrics.MetricsHandler())
+		mux.Handle("/health", metrics.HealthHandler(healthProvider{eng: eng, fsys: fsys}))
+		adminSrv = &http.Server{
+			Addr:              cfg.Metrics.Listen,
+			Handler:           mux,
+			ReadHeaderTimeout: 15 * time.Second,
+		}
+		go func() {
+			slog.Info("admin listening", "addr", cfg.Metrics.Listen, "endpoints", "/metrics /health")
+			if err := adminSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				slog.Error("admin server", "err", err)
+				stop()
+			}
+		}()
+	}
+
 	// ToS-audit loop: periodic proof that the account holds nothing we believe is
 	// released (scoped to Lazarr-added ids while it coexists with decypharr).
 	go func() {
@@ -150,6 +174,11 @@ func main() {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		slog.Error("graceful shutdown", "err", err)
 	}
+	if adminSrv != nil {
+		if err := adminSrv.Shutdown(shutdownCtx); err != nil {
+			slog.Error("admin shutdown", "err", err)
+		}
+	}
 
 	// Stop new reads (unmount FUSE), then release everything still on TorBox so the
 	// account is left clean (ToS). eng.Close stops the reapers and waits for them.
@@ -160,3 +189,24 @@ func main() {
 		slog.Error("engine close (release-all)", "err", err)
 	}
 }
+
+// engStats is the slice of the materialize engine the /health endpoint needs. The concrete
+// engine type is unexported, so we bridge to it through this interface (it satisfies it via
+// its exported SlotsInUse/SlotsTotal/LastAuditUnix methods).
+type engStats interface {
+	SlotsInUse() int
+	SlotsTotal() int
+	LastAuditUnix() int64
+}
+
+// healthProvider adapts the engine + FUSE mount to metrics.HealthProvider for /health.
+type healthProvider struct {
+	eng  engStats
+	fsys *vfs.FS
+}
+
+func (h healthProvider) Mounted() bool        { return h.fsys.Healthy() }
+func (h healthProvider) SlotsInUse() int      { return h.eng.SlotsInUse() }
+func (h healthProvider) SlotsTotal() int      { return h.eng.SlotsTotal() }
+func (h healthProvider) LastAuditUnix() int64 { return h.eng.LastAuditUnix() }
+func (h healthProvider) Version() string      { return version.Version }

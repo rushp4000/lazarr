@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/rushp4000/lazarr/internal/constants"
+	"github.com/rushp4000/lazarr/internal/metrics"
 )
 
 // AuditTOS is the compliance proof (docs/12 §guardrail 2). It diffs TorBox's mylist against
@@ -86,5 +87,7 @@ func (m *materializer) AuditTOS() error {
 	if leaks == 0 && missing == 0 {
 		m.log.Info("TOS AUDIT: clean", "in_scope", len(scope), "believed_held", len(believedSet))
 	}
+	metrics.SetTosAuditLeaks(leaks)
+	m.lastAudit.Store(m.now().Unix())
 	return nil
 }

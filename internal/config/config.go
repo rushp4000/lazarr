@@ -71,6 +71,14 @@ type Ownership struct {
 	PGID int `yaml:"pgid"` // 0 = disabled (leave as-is); else chown created symlinks/dirs to this gid
 }
 
+// Metrics configures the OPT-IN observability admin server. It is disabled by
+// default (empty Listen). When set it serves /metrics (Prometheus) and /health
+// (JSON) on a SEPARATE listener, kept off the arr-facing qbit port; like the
+// qbit listener it is unauthenticated, so bind it to the trusted LAN.
+type Metrics struct {
+	Listen string `yaml:"listen"` // e.g. ":9090"; empty = admin server disabled
+}
+
 type Config struct {
 	TorBox     TorBox    `yaml:"torbox"`
 	QBit       QBit      `yaml:"qbit"`
@@ -78,6 +86,7 @@ type Config struct {
 	Categories []string  `yaml:"categories"`
 	Policy     Policy    `yaml:"policy"`
 	Ownership  Ownership `yaml:"ownership"`
+	Metrics    Metrics   `yaml:"metrics"`
 }
 
 // Default returns a Config pre-populated with sane defaults; YAML overlays it.

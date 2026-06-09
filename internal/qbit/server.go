@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/rushp4000/lazarr/internal/catalog"
+	"github.com/rushp4000/lazarr/internal/metrics"
 	"github.com/rushp4000/lazarr/internal/torbox"
 )
 
@@ -329,6 +330,7 @@ func (s *server) handleTorrentsAdd(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	metrics.IncGrabs()
 	slog.Info("qbit: grab",
 		"hash", hash, "category", category, "name", rel.Name,
 		"size", rel.TotalSize, "cached", rel.Cached, "state", rel.State, "files", len(files))

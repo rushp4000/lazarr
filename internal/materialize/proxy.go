@@ -13,6 +13,7 @@ import (
 
 	"github.com/rushp4000/lazarr/internal/catalog"
 	"github.com/rushp4000/lazarr/internal/constants"
+	"github.com/rushp4000/lazarr/internal/metrics"
 	"github.com/rushp4000/lazarr/internal/torbox"
 )
 
@@ -193,6 +194,7 @@ func (m *materializer) proxyRead(ctx context.Context, ent *entry, fileID int, p 
 	// Refresh-on-4xx: invalidate + re-request ONCE, retry ONCE.
 	if errors.Is(err, torbox.ErrLinkExpired) {
 		m.log.Debug("dl_link expired, refreshing once", "hash", short(ent.hash), "file_id", fileID)
+		metrics.IncLinkRefresh()
 		link, rerr := m.freshLink(ctx, ent, fileID, true)
 		if rerr != nil {
 			return 0, nil, rerr
