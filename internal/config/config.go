@@ -40,9 +40,10 @@ type QBit struct {
 }
 
 type Paths struct {
-	DownloadDir string `yaml:"download_dir"` // arr's qBit save path (per-category subdirs)
-	FuseMount   string `yaml:"fuse_mount"`   // virtual tree root
-	DBPath      string `yaml:"db_path"`      // SQLite catalog file (default /data/lazarr.sqlite)
+	DownloadDir   string `yaml:"download_dir"`    // arr's qBit save path (per-category subdirs)
+	FuseMount     string `yaml:"fuse_mount"`      // virtual tree root
+	DBPath        string `yaml:"db_path"`         // SQLite catalog file (default /data/lazarr.sqlite)
+	ProbeCacheDir string `yaml:"probe_cache_dir"` // bounded header cache (default /data/probe)
 }
 
 type Policy struct {
@@ -91,6 +92,9 @@ func Load(path string) (*Config, error) {
 	}
 	if c.Paths.DBPath == "" {
 		c.Paths.DBPath = "/data/lazarr.sqlite"
+	}
+	if c.Paths.ProbeCacheDir == "" {
+		c.Paths.ProbeCacheDir = "/data/probe"
 	}
 	return c, nil
 }

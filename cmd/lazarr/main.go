@@ -90,7 +90,14 @@ func main() {
 	}()
 
 	// Phase 2 will start here: materialize engine, FUSE mount, idle/max-hold
-	// reapers, and the ToS-audit loop (diff mylist vs materialized set).
+	// reapers, and the ToS-audit loop (diff mylist vs materialized set). Wiring:
+	//   eng := materialize.New(materialize.Deps{
+	//       Store: store, TorBox: tb, Policy: cfg.Policy,
+	//       ProbeCacheDir: cfg.Paths.ProbeCacheDir, Readahead: 0, // 0 => 8 MiB default
+	//   })
+	//   fs := vfs.New(cfg.Paths.FuseMount, store, eng)
+	//   fs.Mount(); go eng-reapers + go AuditTOS loop
+	//   on shutdown: fs.Unmount()/Close() then eng.Close().
 
 	<-ctx.Done()
 	slog.Info("shutting down")

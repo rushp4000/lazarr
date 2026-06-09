@@ -6,6 +6,7 @@ package materialize
 
 import (
 	"github.com/rushp4000/lazarr/internal/catalog"
+	"github.com/rushp4000/lazarr/internal/config"
 	"github.com/rushp4000/lazarr/internal/torbox"
 )
 
@@ -13,8 +14,17 @@ import (
 type Deps struct {
 	Store  catalog.Store
 	TorBox torbox.Client
-	// Slots caps concurrent materializations; 0 = auto from TorBox.UserMe().
-	Slots int
+	// Policy carries the materialization knobs: AllowUncached, IdleTTL, MaxHold,
+	// ActiveSlots (0 = auto-detect the slot count from TorBox.UserMe()), and ProbeCache.
+	Policy config.Policy
+	// ProbeCacheDir is a bounded on-disk dir for cached file-header regions, so Plex
+	// header scans of freshly imported items don't trigger a fresh TorBox add. Required
+	// when Policy.ProbeCache is true.
+	ProbeCacheDir string
+	// Readahead caps how far past the requested window the proxy may fetch, in bytes.
+	// 0 => constants.DefaultReadahead (8 MiB). Reaper interval, link-refresh statuses,
+	// and the createtorrent budget are read from internal/constants (not tunable here).
+	Readahead int64
 }
 
 // Engine is the concrete materializer (built by Agent M). It must satisfy

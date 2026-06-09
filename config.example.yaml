@@ -11,6 +11,8 @@ qbit:
 paths:
   download_dir: "/data/symlinks"   # arr's qBit "save path"; per-category subdirs created here
   fuse_mount: "/data/torbox"       # FUSE virtual tree root
+  db_path: "/data/lazarr.sqlite"   # SQLite catalog (default shown)
+  probe_cache_dir: "/data/probe"   # Phase 2: bounded on-disk header cache (default shown)
 
 categories:                # must match arr names (Radarr movieCategory / Sonarr tvCategory)
   - "radarr_hin"           # start with the canary only
