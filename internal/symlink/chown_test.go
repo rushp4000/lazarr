@@ -1,9 +1,11 @@
 package symlink
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -158,6 +160,93 @@ func TestCreate_ReassertsOwnershipOnIdempotentRun(t *testing.T) {
 	// Two runs -> two lchown calls (create + idempotent reassert).
 	if len(linkRec.calls) != 2 {
 		t.Fatalf("lchown calls = %d, want 2 (create + reassert)", len(linkRec.calls))
+	}
+}
+
+// TestChownDirNoFollow_RejectsSymlink proves the chown primitive refuses to follow a
+// symlink swapped in place of a directory (S4a): the O_NOFOLLOW open fails with ELOOP
+// before any fchown, so root never chowns the attacker-chosen target. No root needed —
+// the rejection happens at the open stage.
+func TestChownDirNoFollow_RejectsSymlink(t *testing.T) {
+	dir := t.TempDir()
+	victim := filepath.Join(dir, "real")
+	if err := os.Mkdir(victim, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "swapped")
+	if err := os.Symlink(victim, link); err != nil {
+		t.Fatal(err)
+	}
+
+	err := chownDirNoFollow(link, 12345, 12345)
+	if err == nil {
+		t.Fatal("chownDirNoFollow must refuse to chown through a symlink")
+	}
+	// The open is rejected at the open stage (ELOOP from O_NOFOLLOW, or ENOTDIR because a
+	// symlink inode is not a directory under O_DIRECTORY) — either way before any fchown, so
+	// the symlink's target is never chowned. Crucially it is NOT EPERM, which would mean the
+	// open succeeded (followed the link) and fchown was attempted.
+	if !errors.Is(err, syscall.ELOOP) && !errors.Is(err, syscall.ENOTDIR) {
+		t.Fatalf("want ELOOP/ENOTDIR (no-follow rejected the symlink before fchown), got %v", err)
+	}
+}
+
+// TestChownDirNoFollow_RejectsNonDir proves O_DIRECTORY rejects a regular file (a created
+// "dir" replaced by a file): the open fails with ENOTDIR before any fchown.
+func TestChownDirNoFollow_RejectsNonDir(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "afile")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := chownDirNoFollow(file, 12345, 12345)
+	if err == nil {
+		t.Fatal("chownDirNoFollow must refuse a non-directory")
+	}
+	if !errors.Is(err, syscall.ENOTDIR) {
+		t.Fatalf("want ENOTDIR (O_DIRECTORY), got %v", err)
+	}
+}
+
+// TestCreate_DoesNotChownAboveDownloadDir proves that when download_dir does not pre-exist,
+// MkdirAll creates it but the chown loop never touches download_dir itself or any ancestor
+// above it (S4b) — only the category/name tree strictly below it is chowned.
+func TestCreate_DoesNotChownAboveDownloadDir(t *testing.T) {
+	const puid, pgid = 1003, 1003
+	parent := t.TempDir()
+	dd := filepath.Join(parent, "downloads") // deliberately does NOT exist yet
+	fuse := t.TempDir()
+
+	dirRec := &chownRec{}
+	linkRec := &chownRec{}
+	m := New(config.Paths{DownloadDir: dd, FuseMount: fuse},
+		config.Ownership{PUID: puid, PGID: pgid}).(*manager)
+	m.chown = dirRec.record
+	m.lchown = linkRec.record
+
+	r := &catalog.Release{Hash: "aabbcc", Name: "Movie", Category: "radarr_hin"}
+	fls := []catalog.File{{Hash: "aabbcc", FileID: 0, RelPath: "movie.mkv", Size: 1}}
+	if err := m.Create(r, fls); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	ddSep := dd + string(filepath.Separator)
+	for _, c := range dirRec.calls {
+		if c.path == dd {
+			t.Fatalf("download_dir %q itself must not be chowned", dd)
+		}
+		if !strings.HasPrefix(c.path, ddSep) {
+			t.Fatalf("chowned a path not strictly under download_dir: %q", c.path)
+		}
+	}
+	// The category + name dirs (strictly under dd) ARE chowned.
+	wantCat := filepath.Join(dd, "radarr_hin")
+	wantName := filepath.Join(dd, "radarr_hin", "Movie")
+	got := dirRec.paths()
+	want := []string{wantCat, wantName}
+	sort.Strings(want)
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("dir chowns = %v, want %v", got, want)
 	}
 }
 

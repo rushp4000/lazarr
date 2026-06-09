@@ -317,6 +317,37 @@ func TestRequestDL_LinkExpired_410(t *testing.T) {
 	assert.True(t, errors.Is(err, torbox.ErrLinkExpired), "must return ErrLinkExpired on 410, got: %v", err)
 }
 
+// TestRequestDL_DeadCacheOrdering proves a gone torrent reported as a 400/403/410 whose
+// detail says "not found" maps to ErrNotFound, not ErrLinkExpired (S6): the not-found check
+// must precede the link-refresh-status branch, else a dead torrent drives an endless
+// refresh→fail→EIO loop instead of erroring the release for re-grab.
+func TestRequestDL_DeadCacheOrdering(t *testing.T) {
+	cases := []struct {
+		name    string
+		status  int
+		detail  string
+		wantErr error
+	}{
+		{"400 not found => dead-cache", http.StatusBadRequest, "torrent not found", torbox.ErrNotFound},
+		{"403 not found => dead-cache", http.StatusForbidden, "file not found", torbox.ErrNotFound},
+		{"410 no longer => dead-cache", http.StatusGone, "torrent no longer exists", torbox.ErrNotFound},
+		{"400 other detail => link expired", http.StatusBadRequest, "link expired", torbox.ErrLinkExpired},
+		{"403 other detail => link expired", http.StatusForbidden, "forbidden", torbox.ErrLinkExpired},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := []byte(`{"success":false,"detail":"` + tc.detail + `","data":null}`)
+			_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+				jsonRespStatus(w, tc.status, body)
+			})
+			_, err := c.RequestDL(1, 0)
+			require.Error(t, err)
+			assert.True(t, errors.Is(err, tc.wantErr),
+				"status %d detail %q: want %v, got %v", tc.status, tc.detail, tc.wantErr, err)
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // ControlDelete
 // ---------------------------------------------------------------------------

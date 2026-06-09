@@ -228,9 +228,18 @@ func (c *client) doRequest(
 
 		statusCode := resp.StatusCode
 
-		// 4xx link-refresh statuses — return immediately, no retry.
+		// 4xx link-refresh statuses — return immediately, no retry. Decode the body so the
+		// REAL API detail is preserved (S6): a gone torrent can be reported as a 400/403/410
+		// whose detail says "not found", and RequestDL must tell that dead-cache case apart
+		// from a genuine stale presigned link. Fall back to a synthetic detail when the body
+		// is empty/unparseable (the common stale-link case carries no useful detail).
 		if slices.Contains(constants.LinkRefreshStatuses, statusCode) {
-			return envelope{}, statusCode, &apiError{StatusCode: statusCode, Detail: "presigned link returned HTTP " + strconv.Itoa(statusCode)}
+			detail := "presigned link returned HTTP " + strconv.Itoa(statusCode)
+			var env envelope
+			if json.NewDecoder(resp.Body).Decode(&env) == nil && env.Detail != "" {
+				detail = env.Detail
+			}
+			return envelope{}, statusCode, &apiError{StatusCode: statusCode, Detail: detail}
 		}
 
 		// 5xx — retry.
@@ -399,16 +408,20 @@ func (c *client) RequestDL(torrentID int64, fileID int) (string, error) {
 
 	env, statusCode, err := c.doGET(context.Background(), constants.EpRequestDL, params)
 	if err != nil {
-		// Check for link-expired sentinel from 4xx (recoverable: re-request the link).
-		if slices.Contains(constants.LinkRefreshStatuses, statusCode) {
-			return "", ErrLinkExpired
-		}
-		// 404 / not-found detail => the torrent itself is gone (dead-cache), not a
-		// stale link. Surface the typed sentinel so the engine errors the release.
+		// Dead-cache FIRST (S6): a gone torrent can be reported as HTTP 404 OR as a
+		// 400/403/410 whose detail says "not found". It must map to ErrNotFound so the
+		// engine errors the release and the arr re-grabs — NOT to ErrLinkExpired, which
+		// would drive an endless refresh→fail→EIO retry loop. This check therefore precedes
+		// the link-refresh-status branch below.
 		var ae *apiError
 		if statusCode == http.StatusNotFound ||
 			(errors.As(err, &ae) && detailNotFound(ae.Detail)) {
 			return "", ErrNotFound
+		}
+		// Link-expired sentinel from a 4xx whose detail is NOT a not-found (recoverable:
+		// re-request the presigned link and retry).
+		if slices.Contains(constants.LinkRefreshStatuses, statusCode) {
+			return "", ErrLinkExpired
 		}
 		return "", fmt.Errorf("torbox: requestdl: %w", err)
 	}
