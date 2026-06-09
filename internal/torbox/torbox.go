@@ -11,6 +11,14 @@ var ErrLinkExpired = errors.New("torbox: presigned link expired (refresh)")
 // ErrRateLimited signals the ~60/hour createtorrent limit ("60 per 1 hour").
 var ErrRateLimited = errors.New("torbox: createtorrent rate limited")
 
+// ErrNotFound signals the torrent/cache is gone at materialize time: createtorrent
+// (cached-only) reports the hash is not cached / not found, or requestdl reports the
+// torrent does not exist. This is the dead-cache case (TorBox purged a stale item) —
+// distinct from a transient presigned-link 4xx (ErrLinkExpired), which is recoverable
+// by re-requesting the link. The engine surfaces this as a permanent errored state so
+// the arr blacklists and re-grabs rather than retrying forever.
+var ErrNotFound = errors.New("torbox: torrent not found / not cached (purged)")
+
 // CachedFile is a file within a cached/added torrent.
 type CachedFile struct {
 	ID   int

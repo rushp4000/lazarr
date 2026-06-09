@@ -20,6 +20,14 @@ func (m *materializer) runReapers(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+			// Broken-mount guard (CRITICAL): the reapers delete from the TorBox account.
+			// If the FUSE mount is unhealthy (a transient blip, a stale connection), skip
+			// the whole sweep so we never mass-delete the account on a mount hiccup. The
+			// items stay materialized and are reaped on a later cycle once the mount is back.
+			if !m.mountIsHealthy() {
+				m.log.Warn("reaper: skipping sweep — FUSE mount unhealthy (guarding against mass account-delete)")
+				continue
+			}
 			m.reapIdle(ctx)
 			m.reapOverMaxHold(ctx)
 		}

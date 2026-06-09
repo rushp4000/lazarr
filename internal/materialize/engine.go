@@ -36,6 +36,13 @@ var ErrUncachedDisabled = errors.New("materialize: release not cached and allow_
 // release can be evicted to make room (every slot is actively being read).
 var ErrSlotsExhausted = errors.New("materialize: all active slots busy with in-use releases")
 
+// ErrPurged is returned when TorBox reports the torrent is gone / not cached at
+// materialize time (dead-cache: a stale item TorBox purged). This is DISTINCT from a
+// transient presigned-link 4xx, which proxyRead recovers via refresh-on-4xx. On this
+// error the engine marks the release errored (catalog.StateError) so the arr blacklists
+// and re-grabs, rather than surfacing a silent EIO that the arr would retry forever.
+var ErrPurged = errors.New("materialize: release purged / not cached on TorBox (dead-cache)")
+
 // nowFunc returns the current unix time; overridable in tests.
 type nowFunc func() time.Time
 
@@ -51,6 +58,13 @@ type materializer struct {
 	probe     *probeCache // nil if disabled / unwritable
 
 	prox *proxy // SSRF-safe range proxy
+
+	// mountHealthy is an optional broken-mount guard, set from main via SetMountHealthy.
+	// When non-nil and it returns false, the idle/max-hold reapers SKIP their sweep
+	// instead of calling ControlDelete — a transient FUSE blip must never trigger a mass
+	// account-delete. nil => behave as before (always reap). Set once before Start; read
+	// by the reaper goroutine, which is the only consumer, so no extra synchronization.
+	mountHealthy func() bool
 
 	// slots is the active-materialization budget (semaphore). Capacity is resolved once
 	// in New from Policy.ActiveSlots / UserMe / DefaultActiveSlots.
@@ -154,6 +168,19 @@ func (m *materializer) SetLogger(l *slog.Logger) {
 	}
 }
 
+// SetMountHealthy installs the broken-mount guard. fn should be a cheap probe of the
+// FUSE mount (e.g. vfs.FS.Healthy). When it returns false the idle/max-hold reapers
+// skip their sweep so a transient mount blip never mass-deletes from the account. Set
+// once before Start; nil restores the default (always reap). Not part of the frozen
+// Engine interface.
+func (m *materializer) SetMountHealthy(fn func() bool) { m.mountHealthy = fn }
+
+// mountIsHealthy reports whether reaping is currently allowed. No guard installed =>
+// always allowed (preserves pre-Phase-3 behaviour).
+func (m *materializer) mountIsHealthy() bool {
+	return m.mountHealthy == nil || m.mountHealthy()
+}
+
 // slotCap reports the configured active-slot budget.
 func (m *materializer) slotCap() int { return cap(m.slots) }
 
@@ -240,6 +267,12 @@ func (m *materializer) ReadAt(hash string, fileID int, p []byte, off int64) (int
 	// 3+4. Resolve a fresh link and range-proxy the window (with one refresh-on-4xx retry).
 	n, body, err := m.proxyRead(ctx, ent, fileID, p, off)
 	if err != nil {
+		// Dead-cache at stream time: TorBox purged a release we believed materialized
+		// (requestdl returns not-found, NOT a recoverable stale-link 4xx). Tear the entry
+		// down and mark it errored so the arr re-grabs, instead of looping on EIO.
+		if errors.Is(err, torbox.ErrNotFound) {
+			return 0, m.markPurged(hash)
+		}
 		return n, err
 	}
 
@@ -340,6 +373,11 @@ func (m *materializer) materialize(ctx context.Context, hash string) (*entry, er
 		case errors.Is(err, torbox.ErrRateLimited):
 			// Do NOT spin/retry — surface a clear, wrapped error for the caller to back off.
 			return nil, fmt.Errorf("materialize: createtorrent rate limited for %s: %w", short(hash), err)
+		case errors.Is(err, torbox.ErrNotFound):
+			// Dead-cache: TorBox purged this item, so it can never materialize. Mark it
+			// errored (permanent) and surface ErrPurged so the arr blacklists + re-grabs,
+			// rather than a silent EIO it would retry forever.
+			return nil, m.markPurged(hash)
 		case isNotCached(err) && !m.policy.AllowUncached:
 			// Mark the release errored so the catalog reflects reality; the read fails clearly.
 			_ = m.store.SetState(hash, catalog.StateError, 0)
@@ -509,6 +547,43 @@ func (m *materializer) Release(hash string) error {
 		m.log.Info("released", "hash", short(hash), "torbox_id", id)
 	}
 	return err
+}
+
+// markPurged handles the dead-cache case: TorBox reports the torrent is gone. It marks
+// the release errored in the catalog (a permanent state the arr can act on), tears down
+// any in-memory entry, and frees the slot it held — then returns ErrPurged.
+//
+// Safety vs. the active reader: when called from ReadAt the entry has refs>0 and ReadAt
+// has a deferred unpin(hash). We remove the entry here regardless (the torrent no longer
+// exists on TorBox, so there is nothing to protect from teardown); the later unpin then
+// finds no entry and is a safe no-op. The in-memory slot is freed exactly once, here.
+func (m *materializer) markPurged(hash string) error {
+	m.mu.Lock()
+	ent, ok := m.track[hash]
+	if ok {
+		delete(m.track, hash)
+	}
+	m.mu.Unlock()
+
+	// Persist the permanent errored state so the arr blacklists + re-grabs.
+	if serr := m.store.SetState(hash, catalog.StateError, 0); serr != nil {
+		m.log.Warn("materialize: persist purged state failed", "hash", short(hash), "err", serr)
+	}
+
+	// If it was tracked it held a slot (and, best-effort, may still have a TorBox id we can
+	// attempt to clean up — harmless if already gone). Free the slot exactly once.
+	if ok {
+		if ent.torboxID != 0 {
+			if derr := m.tb.ControlDelete(ent.torboxID); derr != nil {
+				m.log.Debug("materialize: controldelete on purged release (ignored)",
+					"hash", short(hash), "id", ent.torboxID, "err", derr)
+			}
+		}
+		m.releaseSlot()
+	}
+
+	m.log.Warn("materialize: release purged on TorBox (dead-cache), marked errored", "hash", short(hash))
+	return fmt.Errorf("materialize: %s: %w", short(hash), ErrPurged)
 }
 
 // short truncates an infohash for logs (never log full secrets/paths unnecessarily).

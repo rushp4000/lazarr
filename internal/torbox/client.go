@@ -366,6 +366,11 @@ func (c *client) CreateTorrent(magnet string, addOnlyIfCached bool) (int64, stri
 		if strings.Contains(env.Detail, "60 per 1 hour") {
 			return 0, "", ErrRateLimited
 		}
+		// Dead-cache: a cached-only add whose hash is no longer cached / not found.
+		// Surface the typed sentinel so the engine can mark the release errored.
+		if addOnlyIfCached && detailNotFound(env.Detail) {
+			return 0, "", ErrNotFound
+		}
 		return 0, "", &apiError{Detail: env.Detail}
 	}
 
@@ -394,9 +399,16 @@ func (c *client) RequestDL(torrentID int64, fileID int) (string, error) {
 
 	env, statusCode, err := c.doGET(context.Background(), constants.EpRequestDL, params)
 	if err != nil {
-		// Check for link-expired sentinel from 4xx.
+		// Check for link-expired sentinel from 4xx (recoverable: re-request the link).
 		if slices.Contains(constants.LinkRefreshStatuses, statusCode) {
 			return "", ErrLinkExpired
+		}
+		// 404 / not-found detail => the torrent itself is gone (dead-cache), not a
+		// stale link. Surface the typed sentinel so the engine errors the release.
+		var ae *apiError
+		if statusCode == http.StatusNotFound ||
+			(errors.As(err, &ae) && detailNotFound(ae.Detail)) {
+			return "", ErrNotFound
 		}
 		return "", fmt.Errorf("torbox: requestdl: %w", err)
 	}
@@ -407,6 +419,17 @@ func (c *client) RequestDL(torrentID int64, fileID int) (string, error) {
 		return "", fmt.Errorf("torbox: requestdl decode url: %w", err)
 	}
 	return dlURL, nil
+}
+
+// detailNotFound reports whether a TorBox detail string indicates the torrent/cache
+// is gone (not found / not cached / does not exist). Matched conservatively so the
+// dead-cache path triggers only on a genuine "gone" signal.
+func detailNotFound(detail string) bool {
+	d := strings.ToLower(detail)
+	return strings.Contains(d, "not found") ||
+		strings.Contains(d, "not cached") ||
+		strings.Contains(d, "does not exist") ||
+		strings.Contains(d, "no longer")
 }
 
 // ----------------------------------------------------------------------------

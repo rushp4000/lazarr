@@ -18,7 +18,9 @@ package vfs
 
 import (
 	"context"
+	"errors"
 	"log/slog"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -105,21 +107,76 @@ func (f *FS) Close() error {
 	return f.Unmount()
 }
 
-// Unmount is an alias for Close.
+// unmountRetries / unmountBackoff bound the EBUSY retry loop in Unmount before we
+// fall back to a lazy (detach) unmount, so shutdown can never hang forever.
+const (
+	unmountRetries = 5
+	unmountBackoff = 200 * time.Millisecond
+)
+
+// Unmount is an alias for Close. It first tries the clean go-fuse unmount; if that
+// reports EBUSY (in-flight reads still draining), it retries with bounded backoff,
+// and as a last resort performs a lazy/detach unmount (MNT_DETACH) so a stuck reader
+// can never wedge shutdown. Calling Unmount on an unmounted FS is a no-op.
 func (f *FS) Unmount() error {
 	f.mu.Lock()
 	srv := f.server
 	f.server = nil
+	mount := f.mount
 	f.mu.Unlock()
 
 	if srv == nil {
 		return nil
 	}
-	if err := srv.Unmount(); err != nil {
-		return err
+
+	var lastErr error
+	for attempt := 0; attempt < unmountRetries; attempt++ {
+		err := srv.Unmount()
+		if err == nil {
+			slog.Info("vfs unmounted", "path", mount)
+			return nil
+		}
+		lastErr = err
+		// Only EBUSY is worth retrying (in-flight reads draining); anything else is
+		// terminal for the clean path and we go straight to the lazy fallback.
+		if !errors.Is(err, syscall.EBUSY) {
+			break
+		}
+		slog.Warn("vfs unmount busy, retrying", "path", mount, "attempt", attempt+1, "err", err)
+		time.Sleep(unmountBackoff)
 	}
-	slog.Info("vfs unmounted", "path", f.mount)
+
+	// Fallback: lazy/detach unmount. MNT_DETACH detaches the filesystem from the tree
+	// immediately and tears it down once the last reference is gone, so shutdown does
+	// not block on a stuck reader. This is best-effort and the recovery of last resort.
+	slog.Warn("vfs unmount falling back to lazy detach", "path", mount, "err", lastErr)
+	if derr := syscall.Unmount(mount, syscall.MNT_DETACH); derr != nil {
+		return errors.Join(lastErr, derr)
+	}
+	slog.Info("vfs lazily unmounted (detached)", "path", mount)
 	return nil
+}
+
+// Healthy reports whether the FUSE mount is up and serving: the server must be
+// attached AND a cheap stat of the mount root must succeed. The materialize engine
+// consults this before the idle/max-hold reapers delete from the TorBox account, so
+// a transient mount blip can never trigger a mass account-delete (see SetMountHealthy
+// in internal/materialize). It is safe to call concurrently.
+func (f *FS) Healthy() bool {
+	f.mu.Lock()
+	srv := f.server
+	mount := f.mount
+	f.mu.Unlock()
+
+	if srv == nil {
+		return false
+	}
+	// A stat of the mount root reaches the kernel FUSE layer; if the connection is
+	// dead/stale the kernel returns an error (e.g. ENOTCONN) rather than succeeding.
+	if _, err := os.Stat(mount); err != nil {
+		return false
+	}
+	return true
 }
 
 // ---------------------------------------------------------------------------

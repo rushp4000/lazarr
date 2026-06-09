@@ -64,3 +64,12 @@ func (m *materializer) reapOnce() {
 	m.reapIdle(testCtx())
 	m.reapOverMaxHold(testCtx())
 }
+
+// runReapOnceGuarded runs one reaper cycle through the broken-mount guard exactly as
+// runReapers does per tick: skip both sweeps when the mount is unhealthy, else reap.
+func (m *materializer) runReapOnceGuarded() {
+	if !m.mountIsHealthy() {
+		return
+	}
+	m.reapOnce()
+}
