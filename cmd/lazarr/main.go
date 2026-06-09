@@ -20,10 +20,16 @@ import (
 
 	"github.com/rushp4000/lazarr/internal/catalog"
 	"github.com/rushp4000/lazarr/internal/config"
+	"github.com/rushp4000/lazarr/internal/materialize"
 	"github.com/rushp4000/lazarr/internal/qbit"
 	"github.com/rushp4000/lazarr/internal/symlink"
 	"github.com/rushp4000/lazarr/internal/torbox"
+	"github.com/rushp4000/lazarr/internal/vfs"
 )
+
+// auditInterval is how often the ToS-audit loop diffs mylist vs the materialized
+// set (docs/12 guardrail 2). Cheap (one mylist pull); 5m keeps the proof current.
+const auditInterval = 5 * time.Minute
 
 func main() {
 	cfgPath := flag.String("config", "config.yaml", "path to config.yaml")
@@ -89,15 +95,46 @@ func main() {
 		}
 	}()
 
-	// Phase 2 will start here: materialize engine, FUSE mount, idle/max-hold
-	// reapers, and the ToS-audit loop (diff mylist vs materialized set). Wiring:
-	//   eng := materialize.New(materialize.Deps{
-	//       Store: store, TorBox: tb, Policy: cfg.Policy,
-	//       ProbeCacheDir: cfg.Paths.ProbeCacheDir, Readahead: 0, // 0 => 8 MiB default
-	//   })
-	//   fs := vfs.New(cfg.Paths.FuseMount, store, eng)
-	//   fs.Mount(); go eng-reapers + go AuditTOS loop
-	//   on shutdown: fs.Unmount()/Close() then eng.Close().
+	// Phase 2: the lazy playback path — materialize engine, FUSE mount, idle +
+	// max-hold reapers, and the ToS-audit loop (diff mylist vs the materialized set).
+	eng, err := materialize.New(materialize.Deps{
+		Store:         store,
+		TorBox:        tb,
+		Policy:        cfg.Policy,
+		ProbeCacheDir: cfg.Paths.ProbeCacheDir,
+		// Readahead 0 => constants.DefaultReadahead (8 MiB).
+	})
+	if err != nil {
+		slog.Error("materialize engine", "err", err)
+		os.Exit(1)
+	}
+	eng.Start(ctx) // idle + max-hold reapers; stop on ctx cancel and at eng.Close.
+
+	fsys := vfs.New(cfg.Paths.FuseMount, store, eng)
+	if err := fsys.Mount(); err != nil {
+		// FUSE is the core of Phase 2 — without it nothing can be read/played.
+		slog.Error("vfs mount failed (need --cap-add SYS_ADMIN --device /dev/fuse)",
+			"mount", cfg.Paths.FuseMount, "err", err)
+		_ = eng.Close()
+		os.Exit(1)
+	}
+
+	// ToS-audit loop: periodic proof that the account holds nothing we believe is
+	// released (scoped to Lazarr-added ids while it coexists with decypharr).
+	go func() {
+		t := time.NewTicker(auditInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if err := eng.AuditTOS(); err != nil {
+					slog.Warn("tos audit failed", "err", err)
+				}
+			}
+		}
+	}()
 
 	<-ctx.Done()
 	slog.Info("shutting down")
@@ -106,5 +143,14 @@ func main() {
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		slog.Error("graceful shutdown", "err", err)
+	}
+
+	// Stop new reads (unmount FUSE), then release everything still on TorBox so the
+	// account is left clean (ToS). eng.Close stops the reapers and waits for them.
+	if err := fsys.Unmount(); err != nil {
+		slog.Error("vfs unmount", "err", err)
+	}
+	if err := eng.Close(); err != nil {
+		slog.Error("engine close (release-all)", "err", err)
 	}
 }
