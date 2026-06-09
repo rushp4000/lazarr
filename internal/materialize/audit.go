@@ -1,0 +1,90 @@
+package materialize
+
+import (
+	"fmt"
+
+	"github.com/rushp4000/lazarr/internal/constants"
+)
+
+// AuditTOS is the compliance proof (docs/12 §guardrail 2). It diffs TorBox's mylist against
+// what Lazarr believes it has materialized and alarms on leaks — anything the account still
+// holds within LAZARR'S SCOPE that Lazarr believes is released.
+//
+// The account is SHARED with decypharr (which hoards ~440 items) during canary/coexistence,
+// so the audit is scoped to Lazarr-added torrent_ids only: it never inspects, and never
+// alarms on, ids Lazarr never added. Scoping uses the union of (a) ids Lazarr currently
+// believes are materialized (Store.MaterializedIDs) and (b) ids Lazarr has added during
+// this process lifetime (the seen set), minus what is currently believed-held.
+//
+// Returns an error only on an API failure; a detected leak is logged/alarmed, not returned
+// as an error (a leak is an operational alarm, not a call failure).
+func (m *materializer) AuditTOS() error {
+	believed, err := m.store.MaterializedIDs()
+	if err != nil {
+		return fmt.Errorf("materialize: audit: materialized ids: %w", err)
+	}
+	believedSet := make(map[int64]struct{}, len(believed))
+	for _, id := range believed {
+		believedSet[id] = struct{}{}
+	}
+
+	// Lazarr's scope = ids we currently believe held + ids we ever added this lifetime.
+	scope := make(map[int64]struct{}, len(believedSet))
+	for id := range believedSet {
+		scope[id] = struct{}{}
+	}
+	m.mu.Lock()
+	for id := range m.seen {
+		scope[id] = struct{}{}
+	}
+	for _, ent := range m.track {
+		// In-memory truth: these are genuinely materialized right now.
+		believedSet[ent.torboxID] = struct{}{}
+		scope[ent.torboxID] = struct{}{}
+	}
+	m.mu.Unlock()
+
+	// Pull the whole account (paged), but only reason about ids in Lazarr's scope.
+	held := make(map[int64]struct{})
+	for offset := 0; ; offset += constants.MyListPageMax {
+		page, err := m.tb.MyList(offset)
+		if err != nil {
+			return fmt.Errorf("materialize: audit: mylist offset %d: %w", offset, err)
+		}
+		if len(page) == 0 {
+			break
+		}
+		for _, d := range page {
+			held[d.ID] = struct{}{}
+		}
+		if len(page) < constants.MyListPageMax {
+			break
+		}
+	}
+
+	var leaks, missing int
+	// Leak: an id within Lazarr's scope that the account still holds but that we do NOT
+	// currently believe is materialized => we released it (or never tracked it) yet it
+	// lingers. This is the ToS alarm.
+	for id := range scope {
+		_, stillHeld := held[id]
+		_, believedHeld := believedSet[id]
+		if stillHeld && !believedHeld {
+			leaks++
+			m.log.Error("TOS AUDIT: leaked torrent on account (believed released)", "torbox_id", id)
+		}
+	}
+	// Drift (informational): we believe an id is held but the account does not have it
+	// (TorBox purged it, or an out-of-band delete). Not a ToS violation; surfaced for ops.
+	for id := range believedSet {
+		if _, ok := held[id]; !ok {
+			missing++
+			m.log.Warn("TOS AUDIT: materialized id not present on account (drift)", "torbox_id", id)
+		}
+	}
+
+	if leaks == 0 && missing == 0 {
+		m.log.Info("TOS AUDIT: clean", "in_scope", len(scope), "believed_held", len(believedSet))
+	}
+	return nil
+}
