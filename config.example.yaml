@@ -26,3 +26,17 @@ policy:
   #   Never set higher than your plan (extra adds get rejected). 0 = auto-detect.
   active_slots: 3
   probe_cache: true        # cache file headers so Plex scans of new imports don't re-add
+
+ownership:
+  # Lazarr runs as ROOT inside the container (required to mount FUSE in Docker), but the
+  # *arr suite runs as its own uid and must be able to move/delete the symlinks Lazarr
+  # creates. Set these to your arr's uid:gid and Lazarr chowns every symlink + dir it
+  # creates to them. 0 = disabled (leave as root). See docs/20-DEPLOYMENT.md.
+  puid: 0                  # e.g. 1000 — the uid your Sonarr/Radarr runs as
+  pgid: 0                  # e.g. 1000 — the gid your Sonarr/Radarr runs as
+
+metrics:
+  # OPT-IN observability on a SEPARATE port (kept off the arr-facing qbit port). Empty =
+  # disabled. When set, serves Prometheus /metrics and JSON /health. Unauthenticated like
+  # the qbit port — bind to the trusted LAN only.
+  listen: ""               # e.g. ":9090"

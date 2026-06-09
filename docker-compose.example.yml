@@ -1,26 +1,57 @@
-# Example: run Lazarr alongside the existing stack (canary on radarr_hin).
-# Lazarr uses its OWN volumes — do NOT share decypharr's. See docs/06.
+# Lazarr — example deployment. Copy to docker-compose.yml and adjust paths.
+# Full walkthrough: docs/20-DEPLOYMENT.md
+#
+# THE ONE THING TO GET RIGHT: the symlink tree + FUSE mount must live on a host
+# path that Sonarr/Radarr AND Plex also mount at the SAME path, and that bind
+# must use rshared propagation so the FUSE mount Lazarr creates is visible to
+# those other containers. Below, the host dir ${LAZARR_DATA} is mounted into
+# Lazarr at /data (rshared); mount the same host dir into your arrs + Plex.
 services:
   lazarr:
-    build: .
-    # image: ghcr.io/<you>/lazarr:latest   # once published (repo decided later)
+    image: ghcr.io/rushp4000/lazarr:latest   # published on tag; or use `build: .`
+    # build: .
     container_name: lazarr
     restart: unless-stopped
+
+    # Run as ROOT (no `user:`). Mounting FUSE in Docker needs an EFFECTIVE
+    # CAP_SYS_ADMIN, which a non-root --user does not get. Instead, set
+    # ownership.puid/pgid in config.yaml to your arr's uid:gid — Lazarr chowns
+    # the symlinks it creates so the arrs can move them on import.
+
     ports:
-      - "8080:8080"            # the arr's qBittorrent client target
+      - "8080:8080"        # qBittorrent API the arrs point at
+      - "9090:9090"        # OPTIONAL metrics/health; only if metrics.listen is set
+
     volumes:
-      - ./config:/config        # config.yaml + lazarr.sqlite
-      - lazarr_symlinks:/data/symlinks
-      - lazarr_torbox:/data/torbox     # FUSE mount (shared to Plex if Plex needs to read it)
+      - ./config:/config   # config.yaml + lazarr.sqlite (+ probe cache)
+      # The shared data root. /data/symlinks (download_dir) + /data/torbox
+      # (fuse_mount) live here. rshared makes the FUSE mount propagate to the host
+      # and into the arr/Plex containers that bind the same host path.
+      - type: bind
+        source: ${LAZARR_DATA:-/srv/lazarr/data}
+        target: /data
+        bind:
+          propagation: rshared
+
     cap_add:
-      - SYS_ADMIN              # required for FUSE
+      - SYS_ADMIN                 # required to mount FUSE
     devices:
       - /dev/fuse
     security_opt:
-      - apparmor:unconfined    # required for FUSE in Docker
-    # Plex must be able to follow the symlinks into /data/torbox; mount the same
-    # paths into the Plex container if running Plex in Docker.
+      - apparmor:unconfined       # required for FUSE in Docker
 
-volumes:
-  lazarr_symlinks:
-  lazarr_torbox:
+    healthcheck:                  # only meaningful if metrics.listen is set
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+# Your Sonarr/Radarr and Plex containers must bind the SAME host dir at the SAME
+# path, e.g. add to each of them:
+#   volumes:
+#     - type: bind
+#       source: ${LAZARR_DATA:-/srv/lazarr/data}
+#       target: /data
+#       bind: { propagation: rslave }
+# so they can follow the symlinks into Lazarr's FUSE tree.
