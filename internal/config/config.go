@@ -42,6 +42,7 @@ type QBit struct {
 type Paths struct {
 	DownloadDir string `yaml:"download_dir"` // arr's qBit save path (per-category subdirs)
 	FuseMount   string `yaml:"fuse_mount"`   // virtual tree root
+	DBPath      string `yaml:"db_path"`      // SQLite catalog file (default /data/lazarr.sqlite)
 }
 
 type Policy struct {
@@ -87,6 +88,9 @@ func Load(path string) (*Config, error) {
 	}
 	if c.TorBox.APIBase == "" {
 		c.TorBox.APIBase = constants.TorBoxAPIBase
+	}
+	if c.Paths.DBPath == "" {
+		c.Paths.DBPath = "/data/lazarr.sqlite"
 	}
 	return c, nil
 }

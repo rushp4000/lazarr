@@ -1,38 +1,98 @@
 // Command lazarr is a self-hosted, ToS-compliant TorBox lazy-materialize shim that
 // presents as a qBittorrent client to Sonarr/Radarr. See /root/Github/Lazarr/docs.
 //
-// This is the scaffold/foundation: it defines the package contracts and wiring order.
-// Phase 1 (Agents T/Q/C/S) implements torbox/qbit/catalog/symlink; Phase 2 (V/M) adds
-// vfs/materialize. See docs/09-build-subagent-plan.md.
+// Phase 1 wires catalog -> torbox -> symlink -> qbit and serves the qBittorrent
+// WebUI emulation. At grab time it symlinks with NO TorBox add (the ToS-compliant
+// core). Phase 2 (vfs/materialize) adds playback materialization + idle release.
 package main
 
 import (
+	"context"
+	"errors"
 	"flag"
-	"log"
+	"log/slog"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
+	"github.com/rushp4000/lazarr/internal/catalog"
 	"github.com/rushp4000/lazarr/internal/config"
+	"github.com/rushp4000/lazarr/internal/qbit"
+	"github.com/rushp4000/lazarr/internal/symlink"
+	"github.com/rushp4000/lazarr/internal/torbox"
 )
 
 func main() {
 	cfgPath := flag.String("config", "config.yaml", "path to config.yaml")
 	flag.Parse()
 
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	slog.SetDefault(logger)
+
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
-		log.Fatalf("lazarr: load config %q: %v", *cfgPath, err)
+		slog.Error("load config", "path", *cfgPath, "err", err)
+		os.Exit(1)
 	}
 
-	log.Printf("lazarr scaffold: qbit=%s fuse=%s download_dir=%s slots=%d uncached=%v categories=%v",
-		cfg.QBit.Listen, cfg.Paths.FuseMount, cfg.Paths.DownloadDir,
-		cfg.Policy.ActiveSlots, cfg.Policy.AllowUncached, cfg.Categories)
+	slog.Info("lazarr starting",
+		"qbit", cfg.QBit.Listen, "fuse", cfg.Paths.FuseMount,
+		"download_dir", cfg.Paths.DownloadDir, "db", cfg.Paths.DBPath,
+		"slots", cfg.Policy.ActiveSlots, "uncached", cfg.Policy.AllowUncached,
+		"categories", cfg.Categories)
 
-	// Wiring order (foundation contract):
-	//   store   := catalog.OpenSQLite(...)            // Agent C
-	//   tb      := torbox.New(cfg.TorBox, ...)         // Agent T
-	//   sym     := symlink.New(cfg.Paths, ...)         // Agent S
-	//   qsrv    := qbit.New(qbit.Deps{cfg, store, tb, sym})  // Agent Q  -> http.ListenAndServe(cfg.QBit.Listen, qsrv)
-	//   eng     := materialize.New(materialize.Deps{store, tb, cfg.Policy.ActiveSlots}) // Agent M
-	//   fs      := vfs.New(cfg.Paths.FuseMount, store, eng)  // Agent V (mounts FUSE)
-	//   go eng.AuditTOS loop; go reapers
-	log.Printf("lazarr: scaffold only — packages awaiting implementation. See docs/09. Exiting.")
+	// catalog -> torbox -> symlink -> qbit (Phase-1 wiring order).
+	store, err := catalog.OpenSQLite(cfg.Paths.DBPath)
+	if err != nil {
+		slog.Error("open catalog", "db", cfg.Paths.DBPath, "err", err)
+		os.Exit(1)
+	}
+	defer func() { _ = store.Close() }()
+
+	tb := torbox.New(cfg.TorBox)
+
+	// Best-effort connectivity/slot check; non-fatal so lazarr still boots if
+	// TorBox is briefly unreachable. Never logs the API key.
+	if acct, err := tb.UserMe(); err != nil {
+		slog.Warn("torbox user/me check failed (continuing)", "err", err)
+	} else {
+		slog.Info("torbox account", "plan", acct.Plan, "active_slots", acct.ActiveSlots,
+			"long_term_storage", acct.LongTermStore, "cooldown_until", acct.CooldownUntil)
+	}
+
+	sym := symlink.New(cfg.Paths)
+
+	qsrv := qbit.New(qbit.Deps{Config: cfg, Store: store, TorBox: tb, Symlink: sym})
+
+	srv := &http.Server{
+		Addr:              cfg.QBit.Listen,
+		Handler:           qsrv,
+		ReadHeaderTimeout: 15 * time.Second,
+	}
+
+	// Graceful shutdown on SIGINT/SIGTERM.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	go func() {
+		slog.Info("qbit listening", "addr", cfg.QBit.Listen)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("http server", "err", err)
+			stop()
+		}
+	}()
+
+	// Phase 2 will start here: materialize engine, FUSE mount, idle/max-hold
+	// reapers, and the ToS-audit loop (diff mylist vs materialized set).
+
+	<-ctx.Done()
+	slog.Info("shutting down")
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		slog.Error("graceful shutdown", "err", err)
+	}
 }
