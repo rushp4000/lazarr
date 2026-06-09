@@ -1,0 +1,26 @@
+# Lazarr config — copy to config.yaml and fill in. See docs/05 §7 and docs/11.
+torbox:
+  api_key: "PUT-YOUR-TORBOX-KEY-HERE"        # from your TorBox account
+  api_base: "https://api.torbox.app/v1/api"  # verified base (the /v1 matters)
+
+qbit:
+  listen: ":8080"        # the arr points its qBittorrent client here
+  username: "lazarr"     # what the arr sends (optional check)
+  password: "lazarr"
+
+paths:
+  download_dir: "/data/symlinks"   # arr's qBit "save path"; per-category subdirs created here
+  fuse_mount: "/data/torbox"       # FUSE virtual tree root
+
+categories:                # must match arr names (Radarr movieCategory / Sonarr tvCategory)
+  - "radarr_hin"           # start with the canary only
+
+policy:
+  allow_uncached: false    # cached-only default; toggle on to let TorBox really download uncached
+  idle_ttl: "15m"          # release a materialized item after this much no-access
+  max_hold: "24h"          # hard ceiling regardless of access (well under TorBox's 30d)
+  # active_slots: concurrent materializations. SET TO YOUR TORBOX PLAN'S SLOT COUNT.
+  #   Essential = 3 (default). Pro/Standard allow more -> raise to match.
+  #   Never set higher than your plan (extra adds get rejected). 0 = auto-detect.
+  active_slots: 3
+  probe_cache: true        # cache file headers so Plex scans of new imports don't re-add

@@ -1,0 +1,26 @@
+# Example: run Lazarr alongside the existing stack (canary on radarr_hin).
+# Lazarr uses its OWN volumes — do NOT share decypharr's. See docs/06.
+services:
+  lazarr:
+    build: .
+    # image: ghcr.io/<you>/lazarr:latest   # once published (repo decided later)
+    container_name: lazarr
+    restart: unless-stopped
+    ports:
+      - "8080:8080"            # the arr's qBittorrent client target
+    volumes:
+      - ./config:/config        # config.yaml + lazarr.sqlite
+      - lazarr_symlinks:/data/symlinks
+      - lazarr_torbox:/data/torbox     # FUSE mount (shared to Plex if Plex needs to read it)
+    cap_add:
+      - SYS_ADMIN              # required for FUSE
+    devices:
+      - /dev/fuse
+    security_opt:
+      - apparmor:unconfined    # required for FUSE in Docker
+    # Plex must be able to follow the symlinks into /data/torbox; mount the same
+    # paths into the Plex container if running Plex in Docker.
+
+volumes:
+  lazarr_symlinks:
+  lazarr_torbox:
