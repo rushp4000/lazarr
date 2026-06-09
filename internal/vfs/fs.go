@@ -63,17 +63,23 @@ func (f *FS) Mount() error {
 	sec := time.Second
 	opts := &fs.Options{
 		MountOptions: fuse.MountOptions{
-			// DirectMount avoids needing the fusermount(1) helper, which
-			// is important inside Docker where fusermount may be absent.
-			DirectMount: true,
+			// DirectMountStrict mounts via the raw mount(2) syscall and never
+			// falls back to the fusermount3 suid helper. This matters in a
+			// container running as an arbitrary uid (e.g. 1003) that is absent
+			// from /etc/passwd: fusermount3 aborts with "could not determine
+			// username", whereas the raw syscall just needs CAP_SYS_ADMIN.
+			DirectMount:       true,
+			DirectMountStrict: true,
 			// AllowOther lets processes other than the mounting uid read the
 			// tree — required so Plex/the *arr suite (often a different uid)
 			// can stat and stream files, mirroring decypharr's rclone mount.
-			// Honoured here because we mount with CAP_SYS_ADMIN via DirectMount
-			// (no fusermount/`user_allow_other` in /etc/fuse.conf needed).
 			AllowOther: true,
-			FsName:     "lazarr",
-			Name:       "lazarr",
+			// max_read for the raw mount is derived from MaxWrite; 0 makes the
+			// kernel reject the mount with EINVAL. 1 MiB matches decypharr's
+			// rclone mount (max_read=1048576).
+			MaxWrite: 1 << 20,
+			FsName:   "lazarr",
+			Name:     "lazarr",
 		},
 		EntryTimeout: &sec,
 		AttrTimeout:  &sec,
