@@ -1,6 +1,7 @@
 package catalog
 
 import (
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -58,6 +59,57 @@ func TestMigrationsIdempotent(t *testing.T) {
 	// Open the same file a second time; migrations must not fail.
 	s2, err := OpenSQLite(path)
 	require.NoError(t, err, "second open of same DB should not fail")
+	require.NoError(t, s2.Close())
+}
+
+// TestMigrateAddsMaterializedAt simulates the canary's pre-existing DB: a release table
+// created BEFORE the materialized_at column (B1). OpenSQLite must add the column
+// idempotently and backfill pre-existing materialized rows to NOW so they are not instantly
+// reap-eligible (materialized_at=0 would read as the epoch).
+func TestMigrateAddsMaterializedAt(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "legacy.db")
+
+	// Build a legacy DB: the old release schema (no materialized_at) with one materialized
+	// row and one virtual row.
+	raw, err := sql.Open("sqlite", "file:"+path)
+	require.NoError(t, err)
+	_, err = raw.Exec(`
+		CREATE TABLE release (
+		    hash TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', category TEXT NOT NULL DEFAULT '',
+		    magnet TEXT NOT NULL DEFAULT '', total_size INTEGER NOT NULL DEFAULT 0,
+		    state TEXT NOT NULL DEFAULT 'virtual', cached INTEGER NOT NULL DEFAULT 0,
+		    torbox_id INTEGER NOT NULL DEFAULT 0, added_on INTEGER NOT NULL DEFAULT 0,
+		    last_access INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL DEFAULT 0
+		);
+		INSERT INTO release (hash, state, torbox_id, added_on) VALUES ('mat', 'materialized', 5, 100);
+		INSERT INTO release (hash, state) VALUES ('virt', 'virtual');`)
+	require.NoError(t, err)
+	require.NoError(t, raw.Close())
+
+	// Open via the production path → migration adds the column + backfills.
+	s, err := OpenSQLite(path)
+	require.NoError(t, err, "opening a legacy DB must migrate cleanly")
+	t.Cleanup(func() { s.Close() })
+
+	mat, _, err := s.GetRelease("mat")
+	require.NoError(t, err)
+	assert.Greater(t, mat.MaterializedAt, int64(0), "pre-existing materialized row backfilled to NOW")
+
+	virt, _, err := s.GetRelease("virt")
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), virt.MaterializedAt, "virtual row stays at 0")
+
+	// The just-backfilled row must NOT be over-max-hold against a recent cutoff (it would be
+	// if materialized_at were left at the epoch) — the whole point of the backfill.
+	over, err := s.OverMaxHold(50) // cutoff well before NOW
+	require.NoError(t, err)
+	assert.Empty(t, over, "freshly-backfilled row is not instantly reap-eligible")
+
+	// Re-open to prove the ALTER is idempotent on an already-migrated DB.
+	require.NoError(t, s.Close())
+	s2, err := OpenSQLite(path)
+	require.NoError(t, err, "re-open of migrated DB must not fail")
 	require.NoError(t, s2.Close())
 }
 

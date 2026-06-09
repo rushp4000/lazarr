@@ -21,6 +21,13 @@ func (m *materializer) AllowTestHost(host string) { m.prox.allowHost(host) }
 // SetNow overrides the engine clock for deterministic tests.
 func (m *materializer) SetNow(f func() time.Time) { m.now = f }
 
+// SetDrainTimeout overrides the Close ref-drain window (B3) so shutdown tests don't wait
+// the full production grace period.
+func (m *materializer) SetDrainTimeout(d time.Duration) { m.drainTimeout = d }
+
+// Reconcile runs the boot-time reconciliation sweep synchronously for tests (B2).
+func (m *materializer) Reconcile() { m.reconcile(testCtx()) }
+
 // SlotCap exposes the resolved active-slot budget.
 func (m *materializer) SlotCap() int { return m.slotCap() }
 
