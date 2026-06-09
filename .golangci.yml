@@ -1,0 +1,39 @@
+# golangci-lint v2 configuration for Lazarr.
+# Conservative, signal-over-noise set: the default analyzers plus a few
+# high-value linters. Tuned so `golangci-lint run` is green on this tree.
+version: "2"
+
+linters:
+  # default "standard" = errcheck, govet, ineffassign, staticcheck, unused.
+  default: standard
+  enable:
+    - misspell    # common spelling mistakes in comments/strings
+    - revive      # golint successor; style + obvious bugs
+    - gosec       # security findings (we already carry justified //nolint:gosec)
+    - bodyclose   # HTTP response bodies must be closed (we range-proxy CDN GETs)
+    - errorlint   # correct errors.Is/As usage and %w wrapping
+
+  settings:
+    revive:
+      rules:
+        # Keep revive useful but not pedantic; rely on govet/staticcheck for the rest.
+        - name: exported
+          disabled: true   # godoc coverage is enforced by review, not the linter
+    gosec:
+      excludes:
+        - G104   # unhandled errors — errcheck owns this; avoid double-reporting
+
+  exclusions:
+    generated: lax
+    rules:
+      # Test files may ignore errors and use weaker patterns freely.
+      - path: _test\.go
+        linters:
+          - errcheck
+          - gosec
+          - bodyclose
+
+formatters:
+  enable:
+    - gofmt
+    - goimports

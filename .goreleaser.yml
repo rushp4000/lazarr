@@ -1,0 +1,47 @@
+# GoReleaser v2 — binary archives + checksums + GitHub release on tag.
+# The multi-arch container image is built & pushed separately by
+# .github/workflows/release.yml (buildx against the project Dockerfile).
+version: 2
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: lazarr
+    main: ./cmd/lazarr
+    binary: lazarr
+    env:
+      - CGO_ENABLED=0   # pure-Go: modernc.org/sqlite + hanwen/go-fuse
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X github.com/rushp4000/lazarr/internal/version.Version={{ .Version }}
+
+archives:
+  - id: lazarr
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+release:
+  github:
+    owner: rushp4000
+    name: lazarr

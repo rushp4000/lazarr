@@ -159,38 +159,38 @@ func (s *server) handleBuildInfo(w http.ResponseWriter, _ *http.Request) {
 
 func (s *server) handlePreferences(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, map[string]any{
-		"save_path":                   s.deps.Config.Paths.DownloadDir,
-		"temp_path_enabled":           false,
-		"temp_path":                   "",
-		"queueing_enabled":            false,
-		"max_active_downloads":        -1,
-		"max_active_uploads":          -1,
-		"max_active_torrents":         -1,
-		"dont_count_slow_torrents":    false,
-		"incomplete_files_ext":        false,
-		"create_subfolder_enabled":    true,
-		"autorun_enabled":             false,
-		"autorun_program":             "",
-		"listen_port":                 8080,
-		"upnp":                        false,
-		"random_port":                 false,
-		"dl_limit":                    0,
-		"up_limit":                    0,
-		"max_connec":                  -1,
-		"max_connec_per_torrent":      -1,
-		"max_uploads":                 -1,
-		"max_uploads_per_torrent":     -1,
-		"bittorrent_protocol":         0,
-		"limit_utp_rate":              true,
-		"limit_tcp_overhead":          false,
-		"alt_dl_limit":                10,
-		"alt_up_limit":                10,
-		"scheduler_enabled":           false,
-		"web_ui_username":             s.deps.Config.QBit.Username,
-		"bypass_local_auth":           false,
+		"save_path":                            s.deps.Config.Paths.DownloadDir,
+		"temp_path_enabled":                    false,
+		"temp_path":                            "",
+		"queueing_enabled":                     false,
+		"max_active_downloads":                 -1,
+		"max_active_uploads":                   -1,
+		"max_active_torrents":                  -1,
+		"dont_count_slow_torrents":             false,
+		"incomplete_files_ext":                 false,
+		"create_subfolder_enabled":             true,
+		"autorun_enabled":                      false,
+		"autorun_program":                      "",
+		"listen_port":                          8080,
+		"upnp":                                 false,
+		"random_port":                          false,
+		"dl_limit":                             0,
+		"up_limit":                             0,
+		"max_connec":                           -1,
+		"max_connec_per_torrent":               -1,
+		"max_uploads":                          -1,
+		"max_uploads_per_torrent":              -1,
+		"bittorrent_protocol":                  0,
+		"limit_utp_rate":                       true,
+		"limit_tcp_overhead":                   false,
+		"alt_dl_limit":                         10,
+		"alt_up_limit":                         10,
+		"scheduler_enabled":                    false,
+		"web_ui_username":                      s.deps.Config.QBit.Username,
+		"bypass_local_auth":                    false,
 		"bypass_auth_subnet_whitelist_enabled": false,
-		"use_https":                   false,
-		"web_ui_port":                 8080,
+		"use_https":                            false,
+		"web_ui_port":                          8080,
 	})
 }
 
@@ -356,30 +356,30 @@ func toCatalogFiles(hash string, cf []torbox.CachedFile) []catalog.File {
 
 // torrentInfoObj is the JSON shape returned in the /torrents/info array.
 type torrentInfoObj struct {
-	Hash           string  `json:"hash"`
-	Name           string  `json:"name"`
-	Size           int64   `json:"size"`
-	Progress       float64 `json:"progress"`
-	State          string  `json:"state"`
-	Category       string  `json:"category"`
-	SavePath       string  `json:"save_path"`
-	ContentPath    string  `json:"content_path"`
-	Completed      int64   `json:"completed"`
-	AmountLeft     int64   `json:"amount_left"`
-	CompletionOn   int64   `json:"completion_on"`
-	AddedOn        int64   `json:"added_on"`
-	DlSpeed        int64   `json:"dlspeed"`
-	UpSpeed        int64   `json:"upspeed"`
-	ETA            int64   `json:"eta"`
-	Ratio          float64 `json:"ratio"`
-	SeqDl          bool    `json:"seq_dl"`
-	FLPiecePrio    bool    `json:"f_l_piece_prio"`
-	NumSeeds       int     `json:"num_seeds"`
-	NumLeechs      int     `json:"num_leechs"`
-	NumComplete    int     `json:"num_complete"`
-	NumIncomplete  int     `json:"num_incomplete"`
-	Tags           string  `json:"tags"`
-	Tracker        string  `json:"tracker"`
+	Hash          string  `json:"hash"`
+	Name          string  `json:"name"`
+	Size          int64   `json:"size"`
+	Progress      float64 `json:"progress"`
+	State         string  `json:"state"`
+	Category      string  `json:"category"`
+	SavePath      string  `json:"save_path"`
+	ContentPath   string  `json:"content_path"`
+	Completed     int64   `json:"completed"`
+	AmountLeft    int64   `json:"amount_left"`
+	CompletionOn  int64   `json:"completion_on"`
+	AddedOn       int64   `json:"added_on"`
+	DlSpeed       int64   `json:"dlspeed"`
+	UpSpeed       int64   `json:"upspeed"`
+	ETA           int64   `json:"eta"`
+	Ratio         float64 `json:"ratio"`
+	SeqDl         bool    `json:"seq_dl"`
+	FLPiecePrio   bool    `json:"f_l_piece_prio"`
+	NumSeeds      int     `json:"num_seeds"`
+	NumLeechs     int     `json:"num_leechs"`
+	NumComplete   int     `json:"num_complete"`
+	NumIncomplete int     `json:"num_incomplete"`
+	Tags          string  `json:"tags"`
+	Tracker       string  `json:"tracker"`
 }
 
 func (s *server) releaseToInfoObj(r *catalog.Release, files []catalog.File) torrentInfoObj {
@@ -494,42 +494,42 @@ func (s *server) handleTorrentsProperties(w http.ResponseWriter, r *http.Request
 
 	sp := s.savePath(rel.Category)
 	writeJSON(w, map[string]any{
-		"save_path":            sp,
-		"creation_date":        rel.AddedOn,
-		"piece_size":           0,
-		"comment":              "",
-		"total_wasted":         0,
-		"total_uploaded":       0,
-		"total_uploaded_session": 0,
-		"total_downloaded":     rel.TotalSize,
+		"save_path":                sp,
+		"creation_date":            rel.AddedOn,
+		"piece_size":               0,
+		"comment":                  "",
+		"total_wasted":             0,
+		"total_uploaded":           0,
+		"total_uploaded_session":   0,
+		"total_downloaded":         rel.TotalSize,
 		"total_downloaded_session": rel.TotalSize,
-		"up_limit":             0,
-		"dl_limit":             0,
-		"time_elapsed":         0,
-		"seeding_time":         0,
-		"nb_connections":       0,
-		"nb_connections_limit": 100,
-		"share_ratio":          0,
-		"addition_date":        rel.AddedOn,
-		"completion_date":      rel.AddedOn,
-		"created_by":           "Lazarr",
-		"dl_speed_avg":         0,
-		"dl_speed":             0,
-		"eta":                  0,
-		"last_seen":            rel.AddedOn,
-		"peers":                0,
-		"peers_total":          0,
-		"pieces_have":          0,
-		"pieces_num":           0,
-		"reannounce":           0,
-		"seeds":                0,
-		"seeds_total":          0,
-		"total_size":           rel.TotalSize,
-		"up_speed_avg":         0,
-		"up_speed":             0,
-		"name":                 rel.Name,
-		"hash":                 rel.Hash,
-		"content_path":         s.contentPath(rel, files),
+		"up_limit":                 0,
+		"dl_limit":                 0,
+		"time_elapsed":             0,
+		"seeding_time":             0,
+		"nb_connections":           0,
+		"nb_connections_limit":     100,
+		"share_ratio":              0,
+		"addition_date":            rel.AddedOn,
+		"completion_date":          rel.AddedOn,
+		"created_by":               "Lazarr",
+		"dl_speed_avg":             0,
+		"dl_speed":                 0,
+		"eta":                      0,
+		"last_seen":                rel.AddedOn,
+		"peers":                    0,
+		"peers_total":              0,
+		"pieces_have":              0,
+		"pieces_num":               0,
+		"reannounce":               0,
+		"seeds":                    0,
+		"seeds_total":              0,
+		"total_size":               rel.TotalSize,
+		"up_speed_avg":             0,
+		"up_speed":                 0,
+		"name":                     rel.Name,
+		"hash":                     rel.Hash,
+		"content_path":             s.contentPath(rel, files),
 	})
 }
 
@@ -657,20 +657,20 @@ func (s *server) handleMaindata(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, map[string]any{
-		"rid":      1,
+		"rid":         1,
 		"full_update": true,
-		"torrents": torrents,
-		"categories": cats,
+		"torrents":    torrents,
+		"categories":  cats,
 		"server_state": map[string]any{
-			"connection_status":    "connected",
-			"dl_info_speed":        0,
-			"dl_info_data":         0,
-			"up_info_speed":        0,
-			"up_info_data":         0,
-			"dl_rate_limit":        0,
-			"up_rate_limit":        0,
-			"dht_nodes":            0,
-			"free_space_on_disk":   0,
+			"connection_status":  "connected",
+			"dl_info_speed":      0,
+			"dl_info_data":       0,
+			"up_info_speed":      0,
+			"up_info_data":       0,
+			"dl_rate_limit":      0,
+			"up_rate_limit":      0,
+			"dht_nodes":          0,
+			"free_space_on_disk": 0,
 		},
 	})
 }
@@ -679,16 +679,16 @@ func (s *server) handleMaindata(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) handleTransferInfo(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, map[string]any{
-		"dl_info_speed":      0,
-		"dl_info_data":       0,
-		"dl_rate_limit":      0,
-		"up_info_speed":      0,
-		"up_info_data":       0,
-		"up_rate_limit":      0,
-		"dht_nodes":          0,
-		"connection_status":  "connected",
+		"dl_info_speed":        0,
+		"dl_info_data":         0,
+		"dl_rate_limit":        0,
+		"up_info_speed":        0,
+		"up_info_data":         0,
+		"up_rate_limit":        0,
+		"dht_nodes":            0,
+		"connection_status":    "connected",
 		"use_alt_speed_limits": false,
-		"queueing":           false,
+		"queueing":             false,
 	})
 }
 

@@ -189,9 +189,9 @@ type fakeTorBox struct {
 	createCalls   int32
 	requestDL     int32
 	deleteCalls   int32
-	createErr     error               // returned by CreateTorrent if set
-	createErrOnce error               // returned once then cleared
-	nextID        int64               // id to assign on CreateTorrent
+	createErr     error                             // returned by CreateTorrent if set
+	createErrOnce error                             // returned once then cleared
+	nextID        int64                             // id to assign on CreateTorrent
 	dlURLFn       func(id int64, fileID int) string // builds the presigned URL per call
 	requestDLErr  error
 
@@ -267,9 +267,9 @@ func (t *fakeTorBox) UserMe() (*torbox.Account, error) {
 	return &torbox.Account{Plan: 1, ActiveSlots: t.activeSlots}, nil
 }
 
-func (t *fakeTorBox) createCount() int  { return int(atomic.LoadInt32(&t.createCalls)) }
+func (t *fakeTorBox) createCount() int    { return int(atomic.LoadInt32(&t.createCalls)) }
 func (t *fakeTorBox) requestDLCount() int { return int(atomic.LoadInt32(&t.requestDL)) }
-func (t *fakeTorBox) deleteCount() int  { return int(atomic.LoadInt32(&t.deleteCalls)) }
+func (t *fakeTorBox) deleteCount() int    { return int(atomic.LoadInt32(&t.deleteCalls)) }
 
 // ---- fake CDN (httptest) ----------------------------------------------------------------
 

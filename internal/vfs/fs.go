@@ -450,8 +450,10 @@ func inoFromKey(key string) uint64 {
 // fileIno and dirIno derive inode numbers in disjoint keyspaces so a file and a
 // directory can never collide (e.g. file_id 0 vs the hash root, which the old
 // scheme mapped to the same inode).
-func fileIno(hash string, fileID int) uint64 { return inoFromKey(hash + "\x00f" + strconv.Itoa(fileID)) }
-func dirIno(hash, prefix string) uint64      { return inoFromKey(hash + "\x00d" + prefix) }
+func fileIno(hash string, fileID int) uint64 {
+	return inoFromKey(hash + "\x00f" + strconv.Itoa(fileID))
+}
+func dirIno(hash, prefix string) uint64 { return inoFromKey(hash + "\x00d" + prefix) }
 
 // sortDirEntries sorts a slice of DirEntry in-place by Name to guarantee
 // deterministic Readdir output as required by the go-fuse NodeReaddirer docs.

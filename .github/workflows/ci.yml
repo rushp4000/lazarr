@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main, phase3]
+  pull_request:
+
+# Least privilege: CI only needs to read the repo.
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    name: build · vet · test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod   # single source of truth for the Go version
+          cache: true
+      - name: build
+        run: go build ./...
+      - name: vet
+        run: go vet ./...
+      - name: test (pure-Go, CGO off)
+        run: CGO_ENABLED=0 go test ./...
+
+  race:
+    name: race detector
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      # -race needs cgo; ubuntu runners ship gcc. FUSE-mount tests self-skip
+      # when /dev/fuse is absent on the runner, which is expected.
+      - name: test -race
+        run: go test -race ./...
+
+  vuln:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+  lint:
+    name: golangci-lint (advisory)
+    runs-on: ubuntu-latest
+    # Advisory for now: the config (.golangci.yml) is the target state, but the
+    # tree carries pre-existing gosec/errcheck findings. Flip to blocking (drop
+    # continue-on-error) once those are cleaned up — see docs/17 / handoff.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          version: v2.12.2

@@ -67,8 +67,8 @@ const dsnPragmas = "_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&" +
 func applyPragmas(db *sql.DB) error {
 	pragmas := []string{
 		"PRAGMA foreign_keys = ON",
-		"PRAGMA busy_timeout = 5000", // ms; retry writes for up to 5 s
-		"PRAGMA journal_mode = WAL",  // allow concurrent readers
+		"PRAGMA busy_timeout = 5000",  // ms; retry writes for up to 5 s
+		"PRAGMA journal_mode = WAL",   // allow concurrent readers
 		"PRAGMA synchronous = NORMAL", // safe with WAL, faster than FULL
 	}
 	for _, p := range pragmas {

@@ -88,11 +88,11 @@ func (f *fakeStore) TouchAccess(hash string, ts int64) error {
 	return nil
 }
 
-func (f *fakeStore) IdleCandidates(before int64) ([]*catalog.Release, error) { return nil, nil }
+func (f *fakeStore) IdleCandidates(before int64) ([]*catalog.Release, error)  { return nil, nil }
 func (f *fakeStore) OverMaxHold(before int64) ([]*catalog.Release, error)     { return nil, nil }
 func (f *fakeStore) MaterializedIDs() ([]int64, error)                        { return nil, nil }
-func (f *fakeStore) GetLink(hash string, fileID int) (*catalog.DLLink, error)  { return nil, nil }
-func (f *fakeStore) SetLink(l *catalog.DLLink) error                           { return nil }
+func (f *fakeStore) GetLink(hash string, fileID int) (*catalog.DLLink, error) { return nil, nil }
+func (f *fakeStore) SetLink(l *catalog.DLLink) error                          { return nil }
 
 func (f *fakeStore) DeleteRelease(hash string) error {
 	f.deleted = append(f.deleted, hash)
@@ -137,7 +137,7 @@ func (f *fakeTorBox) CheckCached(hashes []string) (map[string]torbox.CachedItem,
 					{ID: 1, Name: "Sintel (2010) [1080p]/Sintel.2010.1080p.en.srt", Size: 19279},
 				},
 			}
-		// uncachedHash → no entry in result (miss)
+			// uncachedHash → no entry in result (miss)
 		}
 	}
 	return result, nil
@@ -165,10 +165,10 @@ func (f *fakeTorBox) CreateTorrent(magnet string, addOnlyIfCached bool) (int64, 
 }
 
 func (f *fakeTorBox) RequestDL(torrentID int64, fileID int) (string, error) { return "", nil }
-func (f *fakeTorBox) ControlDelete(torrentID int64) error                    { return nil }
-func (f *fakeTorBox) MyList(offset int) ([]torbox.TorrentDetail, error)      { return nil, nil }
-func (f *fakeTorBox) MyListByID(id int64) (*torbox.TorrentDetail, error)     { return nil, nil }
-func (f *fakeTorBox) UserMe() (*torbox.Account, error)                       { return &torbox.Account{Plan: 1}, nil }
+func (f *fakeTorBox) ControlDelete(torrentID int64) error                   { return nil }
+func (f *fakeTorBox) MyList(offset int) ([]torbox.TorrentDetail, error)     { return nil, nil }
+func (f *fakeTorBox) MyListByID(id int64) (*torbox.TorrentDetail, error)    { return nil, nil }
+func (f *fakeTorBox) UserMe() (*torbox.Account, error)                      { return &torbox.Account{Plan: 1}, nil }
 
 // fakeSymlink implements symlink.Manager, recording calls.
 type fakeSymlink struct {

@@ -72,9 +72,9 @@ func TestReadAt_RangeProxy(t *testing.T) {
 	newRelease(store, "h1", "magnet:?xt=urn:btih:h1")
 
 	cases := []struct {
-		name     string
-		off      int64
-		size     int
+		name string
+		off  int64
+		size int
 	}{
 		{"head", 0, 4096},
 		{"mid", 500000, 8192},
@@ -474,9 +474,9 @@ func TestAuditTOS_LeakAndScope(t *testing.T) {
 	m.seen[1000] = struct{}{} // Lazarr added 1000 this lifetime
 	m.mu.Unlock()
 	tb.myList = []torbox.TorrentDetail{
-		{ID: 1000, Hash: "leaked"},      // Lazarr leak (in scope, held, not believed)
-		{ID: 7777, Hash: "decypharr"},   // decypharr-owned, NOT in Lazarr scope
-		{ID: 8888, Hash: "decypharr2"},  // decypharr-owned
+		{ID: 1000, Hash: "leaked"},     // Lazarr leak (in scope, held, not believed)
+		{ID: 7777, Hash: "decypharr"},  // decypharr-owned, NOT in Lazarr scope
+		{ID: 8888, Hash: "decypharr2"}, // decypharr-owned
 	}
 
 	// Capture logs to assert the leak is flagged and decypharr ids are not.
@@ -539,14 +539,14 @@ func TestHostPin_RejectsBeforeGET(t *testing.T) {
 	defer func() { _ = m.Close() }()
 
 	bad := []string{
-		"http://nexus-138.snam.tb-cdn.io/dl/x",   // http (not https)
-		"https://evil.example.com/dl/x",          // wrong host
-		"https://127.0.0.1/dl/x",                 // loopback literal
-		"https://10.0.0.5/dl/x",                  // private literal
-		"https://169.254.169.254/latest/meta",    // link-local metadata
-		"https://192.168.1.10/dl/x",              // private literal
+		"http://nexus-138.snam.tb-cdn.io/dl/x",         // http (not https)
+		"https://evil.example.com/dl/x",                // wrong host
+		"https://127.0.0.1/dl/x",                       // loopback literal
+		"https://10.0.0.5/dl/x",                        // private literal
+		"https://169.254.169.254/latest/meta",          // link-local metadata
+		"https://192.168.1.10/dl/x",                    // private literal
 		"https://evil.com.tb-cdn.io.attacker.net/dl/x", // suffix-trick
-		"ftp://nexus.tb-cdn.io/dl/x",             // wrong scheme
+		"ftp://nexus.tb-cdn.io/dl/x",                   // wrong scheme
 	}
 	for _, raw := range bad {
 		if err := m.ValidateURLForTest(raw); err == nil {
@@ -635,4 +635,3 @@ func TestSlotBudgetResolution(t *testing.T) {
 	}
 	_ = m3.Close()
 }
-

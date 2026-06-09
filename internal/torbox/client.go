@@ -579,7 +579,7 @@ type torrentDetailRaw struct {
 func toCachedItem(hash string, r cachedItemRaw) CachedItem {
 	files := make([]CachedFile, len(r.Files))
 	for i, f := range r.Files {
-		files[i] = CachedFile{ID: f.ID, Name: f.Name, Size: f.Size}
+		files[i] = CachedFile(f)
 	}
 	return CachedItem{
 		Hash:  strings.ToLower(hash),
@@ -592,7 +592,7 @@ func toCachedItem(hash string, r cachedItemRaw) CachedItem {
 func toTorrentDetail(r torrentDetailRaw) TorrentDetail {
 	files := make([]CachedFile, len(r.Files))
 	for i, f := range r.Files {
-		files[i] = CachedFile{ID: f.ID, Name: f.Name, Size: f.Size}
+		files[i] = CachedFile(f)
 	}
 	return TorrentDetail{
 		ID:               r.ID,

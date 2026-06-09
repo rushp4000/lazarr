@@ -63,16 +63,16 @@ func (s *fakeStore) GetRelease(hash string) (*catalog.Release, []catalog.File, e
 	return r, cp, nil
 }
 
-func (s *fakeStore) ListByCategory(_ string) ([]*catalog.Release, error)   { return nil, nil }
-func (s *fakeStore) SetState(_ string, _ catalog.State, _ int64) error      { return nil }
-func (s *fakeStore) TouchAccess(_ string, _ int64) error                    { return nil }
-func (s *fakeStore) IdleCandidates(_ int64) ([]*catalog.Release, error)     { return nil, nil }
-func (s *fakeStore) OverMaxHold(_ int64) ([]*catalog.Release, error)        { return nil, nil }
-func (s *fakeStore) MaterializedIDs() ([]int64, error)                      { return nil, nil }
-func (s *fakeStore) GetLink(_ string, _ int) (*catalog.DLLink, error)       { return nil, nil }
-func (s *fakeStore) SetLink(_ *catalog.DLLink) error                        { return nil }
-func (s *fakeStore) DeleteRelease(_ string) error                           { return nil }
-func (s *fakeStore) Close() error                                           { return nil }
+func (s *fakeStore) ListByCategory(_ string) ([]*catalog.Release, error) { return nil, nil }
+func (s *fakeStore) SetState(_ string, _ catalog.State, _ int64) error   { return nil }
+func (s *fakeStore) TouchAccess(_ string, _ int64) error                 { return nil }
+func (s *fakeStore) IdleCandidates(_ int64) ([]*catalog.Release, error)  { return nil, nil }
+func (s *fakeStore) OverMaxHold(_ int64) ([]*catalog.Release, error)     { return nil, nil }
+func (s *fakeStore) MaterializedIDs() ([]int64, error)                   { return nil, nil }
+func (s *fakeStore) GetLink(_ string, _ int) (*catalog.DLLink, error)    { return nil, nil }
+func (s *fakeStore) SetLink(_ *catalog.DLLink) error                     { return nil }
+func (s *fakeStore) DeleteRelease(_ string) error                        { return nil }
+func (s *fakeStore) Close() error                                        { return nil }
 
 // fakeMat implements vfs.Materializer.  ReadAt records every call.  By
 // default it fills dest with a repeated byte value (0xAB) so callers can
@@ -337,7 +337,11 @@ func TestWriteDenied(t *testing.T) {
 
 	var pathErr *os.PathError
 	if errors.As(err, &pathErr) {
-		errno := pathErr.Err.(syscall.Errno) //nolint:forcetypeassert — we check the type
+		errno := func() syscall.Errno {
+			var target syscall.Errno
+			_ = errors.As(pathErr.Err, &target)
+			return target
+		}() //nolint:forcetypeassert — we check the type
 		assert.Equal(t, syscall.EROFS, errno, "expected EROFS for write attempt")
 	}
 }
