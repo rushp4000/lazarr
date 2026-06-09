@@ -1,0 +1,12 @@
+.git
+.gitignore
+.claude
+docs
+*.md
+config.yaml
+*.sqlite
+*.sqlite-*
+testdata
+docker-compose*.yml
+Dockerfile
+.dockerignore

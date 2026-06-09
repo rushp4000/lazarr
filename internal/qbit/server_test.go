@@ -697,3 +697,30 @@ func TestLogout(t *testing.T) {
 	rec := e.do("POST", "/api/v2/auth/logout", nil, "")
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
+
+// TestInfoByHashWithoutCategory guards the canary-discovered fix: *arr clients
+// poll torrents/info by hash with NO category (and sometimes with no filter at
+// all). The server must still resolve the release, or the arr never imports.
+func TestInfoByHashWithoutCategory(t *testing.T) {
+	e := newTestEnv(false)
+	rel := &catalog.Release{
+		Hash: cachedHash, Name: "Big Buck Bunny", Category: "radarr_hin",
+		TotalSize: 100, State: catalog.StateVirtual,
+	}
+	files := []catalog.File{{Hash: cachedHash, FileID: 0, RelPath: "Big Buck Bunny/x.mp4", Size: 100}}
+	require.NoError(t, e.store.UpsertRelease(rel, files))
+
+	// (a) hashes filter, NO category — how radarr polls a tracked download.
+	rec := e.do("GET", "/api/v2/torrents/info?hashes="+cachedHash, nil, "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	var arr []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &arr))
+	require.Len(t, arr, 1)
+	assert.Equal(t, cachedHash, arr[0]["hash"])
+
+	// (b) no filter at all — must return all configured categories' releases.
+	rec2 := e.do("GET", "/api/v2/torrents/info", nil, "")
+	var arr2 []map[string]any
+	require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &arr2))
+	require.Len(t, arr2, 1)
+}

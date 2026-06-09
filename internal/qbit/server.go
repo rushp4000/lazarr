@@ -66,8 +66,22 @@ func New(d Deps) Server {
 	return s
 }
 
+// statusRecorder captures the response status for request logging.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (sr *statusRecorder) WriteHeader(code int) {
+	sr.status = code
+	sr.ResponseWriter.WriteHeader(code)
+}
+
 func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	s.mux.ServeHTTP(w, r)
+	rec := &statusRecorder{ResponseWriter: w, status: 200}
+	s.mux.ServeHTTP(rec, r)
+	slog.Debug("qbit: req", "method", r.Method, "path", r.URL.Path,
+		"query", r.URL.RawQuery, "status", rec.status)
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -302,6 +316,10 @@ func (s *server) handleTorrentsAdd(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	slog.Info("qbit: grab",
+		"hash", hash, "category", category, "name", rel.Name,
+		"size", rel.TotalSize, "cached", rel.Cached, "state", rel.State, "files", len(files))
+
 	writeText(w, "Ok.")
 }
 
@@ -389,41 +407,50 @@ func (s *server) releaseToInfoObj(r *catalog.Release, files []catalog.File) torr
 	}
 }
 
-func (s *server) handleTorrentsInfo(w http.ResponseWriter, r *http.Request) {
-	category := r.URL.Query().Get("category")
-	hashesParam := r.URL.Query().Get("hashes")
-
-	var releases []*catalog.Release
-	var err error
-
-	if category != "" {
-		releases, err = s.deps.Store.ListByCategory(category)
-	} else {
-		// No category filter: we don't have a ListAll on Store, so we check
-		// hashes param or return empty (arrs always filter by category).
-		releases = []*catalog.Release{}
-	}
-
-	if err != nil {
-		slog.Error("qbit: ListByCategory", "category", category, "err", err)
-		http.Error(w, "store error", http.StatusInternalServerError)
-		return
-	}
-
-	// Apply hashes filter if present.
-	var wantHashes map[string]bool
-	if hashesParam != "" && hashesParam != "all" {
-		wantHashes = make(map[string]bool)
+// releasesForQuery resolves the releases a torrents/info or sync/maindata query
+// is asking about. The *arr clients are inconsistent: some poll by `hashes` with
+// NO category, some by `category`, some with neither (expecting all). We support
+// all three so the client can always find the torrent it grabbed.
+func (s *server) releasesForQuery(category, hashesParam string) []*catalog.Release {
+	switch {
+	case hashesParam != "" && hashesParam != "all":
+		// Look up the specific hashes directly (no category needed).
+		var out []*catalog.Release
+		seen := make(map[string]bool)
 		for _, h := range strings.Split(hashesParam, "|") {
-			wantHashes[strings.ToLower(strings.TrimSpace(h))] = true
+			h = strings.ToLower(strings.TrimSpace(h))
+			if h == "" || seen[h] {
+				continue
+			}
+			seen[h] = true
+			if rel, _, err := s.deps.Store.GetRelease(h); err == nil && rel != nil {
+				out = append(out, rel)
+			}
 		}
+		return out
+	case category != "":
+		rels, err := s.deps.Store.ListByCategory(category)
+		if err != nil {
+			slog.Error("qbit: ListByCategory", "category", category, "err", err)
+		}
+		return rels
+	default:
+		// Neither filter: return all releases across configured categories.
+		var out []*catalog.Release
+		for _, c := range s.deps.Config.Categories {
+			if rels, err := s.deps.Store.ListByCategory(c); err == nil {
+				out = append(out, rels...)
+			}
+		}
+		return out
 	}
+}
+
+func (s *server) handleTorrentsInfo(w http.ResponseWriter, r *http.Request) {
+	releases := s.releasesForQuery(r.URL.Query().Get("category"), r.URL.Query().Get("hashes"))
 
 	result := make([]torrentInfoObj, 0, len(releases))
 	for _, rel := range releases {
-		if wantHashes != nil && !wantHashes[strings.ToLower(rel.Hash)] {
-			continue
-		}
 		_, files, err2 := s.deps.Store.GetRelease(rel.Hash)
 		if err2 != nil {
 			slog.Warn("qbit: GetRelease in info", "hash", rel.Hash, "err", err2)
@@ -598,21 +625,7 @@ func (s *server) handleNoop(w http.ResponseWriter, _ *http.Request) {
 // ── sync/maindata ─────────────────────────────────────────────────────────────
 
 func (s *server) handleMaindata(w http.ResponseWriter, r *http.Request) {
-	category := r.URL.Query().Get("category")
-
-	var releases []*catalog.Release
-	var err error
-	if category != "" {
-		releases, err = s.deps.Store.ListByCategory(category)
-	} else {
-		// Return empty torrents map — arrs use /info directly more often.
-		releases = []*catalog.Release{}
-	}
-
-	if err != nil {
-		slog.Error("qbit: maindata ListByCategory", "err", err)
-		releases = []*catalog.Release{}
-	}
+	releases := s.releasesForQuery(r.URL.Query().Get("category"), "")
 
 	torrents := make(map[string]torrentInfoObj, len(releases))
 	for _, rel := range releases {
