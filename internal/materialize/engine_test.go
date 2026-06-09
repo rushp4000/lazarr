@@ -407,7 +407,8 @@ func TestReaper_Idle(t *testing.T) {
 func TestReaper_MaxHold(t *testing.T) {
 	content := bytes.Repeat([]byte{6}, 8<<10)
 	m, store, tb, _ := engineWithCDN(t, content, 3, "")
-	// AddedOn far in the past so OverMaxHold matches regardless of access.
+	// B1: max-hold is measured from MATERIALIZE time, not grab time. A stale AddedOn alone
+	// must NOT trigger the ceiling — set it 48h in the past to prove that does NOT matter.
 	store.addRelease(&catalog.Release{
 		Hash: "mh", Magnet: "magnet:mh", State: catalog.StateVirtual, Cached: true,
 		AddedOn: time.Now().Add(-48 * time.Hour).Unix(),
@@ -417,13 +418,47 @@ func TestReaper_MaxHold(t *testing.T) {
 	if _, err := m.ReadAt("mh", 0, p, 0); err != nil {
 		t.Fatalf("read: %v", err)
 	}
+	// materialized_at is stamped to NOW on materialize. Jump the engine clock past max-hold
+	// so the hold window (measured from materialize) is exceeded and the ceiling fires.
 	m.policy.MaxHold = config.Duration(24 * time.Hour)
+	future := time.Now().Add(48 * time.Hour)
+	m.SetNow(func() time.Time { return future })
 	m.reapOnce()
 	if m.IsTracked("mh") {
 		t.Fatalf("over-max-hold release not reaped")
 	}
 	if tb.deleteCount() < 1 {
 		t.Fatalf("expected ControlDelete on max-hold reap")
+	}
+}
+
+// B1: a release grabbed long ago but freshly materialized must NOT be an instant max-hold
+// candidate — the hold window starts at materialize time, preventing add/delete churn.
+func TestReaper_MaxHold_FromMaterializeNotGrab(t *testing.T) {
+	content := bytes.Repeat([]byte{7}, 8<<10)
+	m, store, tb, _ := engineWithCDN(t, content, 3, "")
+	store.addRelease(&catalog.Release{
+		Hash: "old", Magnet: "magnet:old", State: catalog.StateVirtual, Cached: true,
+		AddedOn: time.Now().Add(-72 * time.Hour).Unix(), // grabbed 3 days ago
+	})
+
+	p := make([]byte, 256)
+	if _, err := m.ReadAt("old", 0, p, 0); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	// Just materialized (materialized_at ~= now). With max-hold 24h and no clock jump it is
+	// well within the window despite the ancient AddedOn → must survive the reap.
+	m.policy.MaxHold = config.Duration(24 * time.Hour)
+	m.reapOnce()
+	if !m.IsTracked("old") {
+		t.Fatalf("freshly-materialized release was reaped on a stale AddedOn (B1 regression)")
+	}
+	if tb.deleteCount() != 0 {
+		t.Fatalf("expected no ControlDelete for a freshly-materialized release, got %d", tb.deleteCount())
+	}
+	// Unpin/clean up so Close releases cleanly.
+	if err := m.Close(); err != nil {
+		t.Fatalf("close: %v", err)
 	}
 }
 

@@ -88,8 +88,17 @@ type materializer struct {
 	// mu guards the in-memory materialized-set bookkeeping (track + lru). It is never held
 	// across network I/O (slot admission, GET, CreateTorrent) — see admit/lockstep helpers.
 	mu    sync.Mutex
-	track map[string]*entry  // hash -> live materialization state
-	seen  map[int64]struct{} // torbox ids Lazarr has added this lifetime (audit scope)
+	track map[string]*entry   // hash -> live materialization state
+	seen  map[int64]struct{}  // torbox ids Lazarr has added this lifetime (audit scope)
+	// inflight marks hashes whose materialize is currently running (singleflight winner,
+	// between the slot-admit and register-in-track). releaseUntracked (B2) consults it so a
+	// boot-reconcile / reaper sweep never deletes a TorBox item a concurrent first-read is
+	// in the middle of creating/adopting.
+	inflight map[string]struct{}
+
+	// drainTimeout is how long Close waits for in-flight readers to drop their refs before
+	// force-releasing pinned entries (B3). Wall-clock; overridable in tests.
+	drainTimeout time.Duration
 
 	// reaper lifecycle.
 	startOnce sync.Once
@@ -122,14 +131,16 @@ func New(d Deps) (*materializer, error) {
 	}
 
 	m := &materializer{
-		store:  d.Store,
-		tb:     d.TorBox,
-		policy: d.Policy,
-		log:    slog.Default(),
-		now:    time.Now,
-		track:  make(map[string]*entry),
-		seen:   make(map[int64]struct{}),
-		prox:   newProxy(),
+		store:        d.Store,
+		tb:           d.TorBox,
+		policy:       d.Policy,
+		log:          slog.Default(),
+		now:          time.Now,
+		track:        make(map[string]*entry),
+		seen:         make(map[int64]struct{}),
+		inflight:     make(map[string]struct{}),
+		drainTimeout: constants.DefaultCloseDrain,
+		prox:         newProxy(),
 	}
 
 	// Resolve the active-slot budget: explicit policy > UserMe() > DefaultActiveSlots.
@@ -199,9 +210,46 @@ func (m *materializer) Start(ctx context.Context) {
 		m.wg.Add(1)
 		go func() {
 			defer m.wg.Done()
+			// Boot-time reconciliation (B2): release any item the store still believes is
+			// materialized but that this fresh process does not track — a crash/restart
+			// leftover the in-memory reapers can never see. Runs before the ticker so the
+			// account is honest (and the ToS audit correct) from the first sweep.
+			m.reconcile(rctx)
 			m.runReapers(rctx)
 		}()
 	})
+}
+
+// reconcile releases store-believed-materialized leftovers not tracked in memory (B2). At
+// boot nothing is tracked, so every materialized row with a real TorBox id is a leftover to
+// clean up. Honors ctx cancellation between items.
+func (m *materializer) reconcile(ctx context.Context) {
+	rels, err := m.store.MaterializedReleases()
+	if err != nil {
+		m.log.Warn("materialize: boot reconcile query failed", "err", err)
+		return
+	}
+	for _, rel := range rels {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		if rel == nil || rel.TorBoxID == 0 {
+			continue
+		}
+		m.mu.Lock()
+		_, tracked := m.track[rel.Hash]
+		m.mu.Unlock()
+		if tracked {
+			continue // a live read already owns it
+		}
+		m.log.Warn("materialize: boot reconcile releasing untracked leftover (B2)",
+			"hash", short(rel.Hash), "torbox_id", rel.TorBoxID)
+		if rerr := m.Release(rel.Hash); rerr != nil {
+			m.log.Warn("materialize: boot reconcile release failed", "hash", short(rel.Hash), "err", rerr)
+		}
+	}
 }
 
 // Close stops the reapers, force-releases everything still materialized (ToS: leave the
@@ -210,13 +258,9 @@ func (m *materializer) Start(ctx context.Context) {
 func (m *materializer) Close() error {
 	var err error
 	m.closeOnce.Do(func() {
+		// Mark closed so no NEW read can pin an entry; in-flight reads still hold their refs.
 		m.mu.Lock()
 		m.closed = true
-		// Snapshot the live set; release outside the lock (Release takes mu itself).
-		hashes := make([]string, 0, len(m.track))
-		for h := range m.track {
-			hashes = append(hashes, h)
-		}
 		m.mu.Unlock()
 
 		if m.cancel != nil {
@@ -224,10 +268,25 @@ func (m *materializer) Close() error {
 		}
 		m.wg.Wait() // reapers fully stopped before we touch shared state below
 
-		// Best-effort clean release of anything still held. Errors are aggregated but do
-		// not block shutdown.
-		for _, h := range hashes {
-			if rerr := m.Release(h); rerr != nil {
+		// B3: give in-flight readers a brief window to drop their refs, then force-release
+		// EVERYTHING still tracked regardless of refs. By now main has unmounted (possibly
+		// lazy-detached), so no reader can be meaningfully served — an EIO to a zombie read
+		// beats leaving a TorBox item on the account (a ToS leak that B2 would make permanent
+		// after the next restart). Re-snapshot under lock since the drain window may have
+		// changed the set.
+		m.waitRefsDrain(m.drainTimeout)
+		m.mu.Lock()
+		final := make([]string, 0, len(m.track))
+		for h, ent := range m.track {
+			if ent.refs > 0 {
+				m.log.Warn("materialize: force-releasing pinned entry on shutdown (B3)",
+					"hash", short(h), "refs", ent.refs)
+			}
+			final = append(final, h)
+		}
+		m.mu.Unlock()
+		for _, h := range final {
+			if rerr := m.release(h, true); rerr != nil {
 				err = errors.Join(err, rerr)
 			}
 		}
@@ -318,7 +377,16 @@ func (m *materializer) ensureMaterialized(ctx context.Context, hash string) (*en
 			m.mu.Unlock()
 			return ent, nil
 		}
+		// Mark in-flight so a concurrent releaseUntracked / boot-reconcile (B2) defers to us
+		// instead of deleting the TorBox item we are about to create or adopt. Cleared once
+		// materialize has registered the entry in track (or failed).
+		m.inflight[hash] = struct{}{}
 		m.mu.Unlock()
+		defer func() {
+			m.mu.Lock()
+			delete(m.inflight, hash)
+			m.mu.Unlock()
+		}()
 		return m.materialize(ctx, hash)
 	})
 	if err != nil {
@@ -528,13 +596,22 @@ func (m *materializer) releaseSlot() {
 // path, the reapers, and shutdown. Skips releases that are currently being read (refs>0)
 // so an in-use stream is never torn down. Implements Engine.Release.
 func (m *materializer) Release(hash string) error {
+	return m.release(hash, false)
+}
+
+// release is the shared teardown. When force is false a pinned (refs>0) entry is left
+// alone; when force is true (shutdown, B3) it is torn down regardless — by then the mount
+// is gone, so no reader can be meaningfully served and a leaked TorBox item is the worse
+// outcome. An untracked hash is handled by releaseUntracked (B2): a store-only leftover
+// from a prior process lifetime still on the account is deleted there.
+func (m *materializer) release(hash string, force bool) error {
 	m.mu.Lock()
 	ent, ok := m.track[hash]
 	if !ok {
 		m.mu.Unlock()
-		return nil // already released / never materialized -> no-op
+		return m.releaseUntracked(hash) // B2: maybe a crash/restart leftover on the account
 	}
-	if ent.refs > 0 {
+	if ent.refs > 0 && !force {
 		m.mu.Unlock()
 		return nil // pinned by an active reader -> do not release
 	}
@@ -563,6 +640,91 @@ func (m *materializer) Release(hash string) error {
 		m.log.Info("released", "hash", short(hash), "torbox_id", id)
 	}
 	return err
+}
+
+// releaseUntracked handles the B2 leak: a hash that is NOT in the in-memory track map but
+// that the store still believes is materialized with a real TorBox id. This is a leftover
+// from a prior process lifetime (a crash, or a graceful shutdown that left state) — the
+// in-memory reapers can never see it, and AuditTOS would treat it as "believed held" and
+// stay silent, so the item would sit on the account until TorBox's 30-day purge (a ToS
+// violation). We delete it on TorBox and flip the row to virtual.
+//
+// It never held an in-memory slot in THIS process, so it does not touch the slot semaphore.
+// Guards against racing a concurrent first-read that is adopting/creating the same hash by
+// re-checking track/inflight under mu immediately before the delete.
+func (m *materializer) releaseUntracked(hash string) error {
+	if m.deferToInflight(hash) {
+		return nil
+	}
+
+	rel, _, err := m.store.GetRelease(hash)
+	if err != nil {
+		return fmt.Errorf("materialize: releaseUntracked get %s: %w", short(hash), err)
+	}
+	if rel == nil || rel.State != catalog.StateMaterialized || rel.TorBoxID == 0 {
+		return nil // never materialized / already virtual / no id -> genuine no-op
+	}
+	id := rel.TorBoxID
+
+	// Re-check under lock right before the delete: a concurrent read may have adopted this
+	// leftover in the meantime. If so, defer to the tracked path / the in-flight materialize.
+	if m.deferToInflight(hash) {
+		return nil
+	}
+
+	var ferr error
+	if derr := m.tb.ControlDelete(id); derr != nil {
+		ferr = fmt.Errorf("materialize: controldelete (untracked) %s (id=%d): %w", short(hash), id, derr)
+	}
+	if serr := m.store.SetState(hash, catalog.StateVirtual, 0); serr != nil {
+		ferr = errors.Join(ferr, fmt.Errorf("materialize: set virtual (untracked) %s: %w", short(hash), serr))
+	}
+	if ferr == nil {
+		metrics.IncReleases()
+		m.log.Warn("released untracked materialized leftover (B2)", "hash", short(hash), "torbox_id", id)
+	}
+	return ferr
+}
+
+// deferToInflight reports (under mu) whether a concurrent materialize for hash is tracked or
+// in flight. If tracked, it routes through the normal tracked Release so accounting stays
+// correct; if in flight, releaseUntracked must not delete what that materialize is creating.
+// Returns true when the caller should stop (a no-op / handled elsewhere).
+func (m *materializer) deferToInflight(hash string) bool {
+	m.mu.Lock()
+	_, tracked := m.track[hash]
+	_, inflight := m.inflight[hash]
+	m.mu.Unlock()
+	if tracked {
+		// Now tracked by a concurrent read: tear down via the normal path (frees its slot).
+		_ = m.release(hash, false)
+		return true
+	}
+	return inflight
+}
+
+// waitRefsDrain blocks until no tracked entry has active readers, or until d elapses. Uses
+// wall-clock time (not the overridable engine clock) because it is a shutdown grace period,
+// independent of the logical clock the reapers use; a frozen test clock must not wedge it.
+func (m *materializer) waitRefsDrain(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		m.mu.Lock()
+		pinned := 0
+		for _, ent := range m.track {
+			if ent.refs > 0 {
+				pinned++
+			}
+		}
+		m.mu.Unlock()
+		if pinned == 0 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 // markPurged handles the dead-cache case: TorBox reports the torrent is gone. It marks

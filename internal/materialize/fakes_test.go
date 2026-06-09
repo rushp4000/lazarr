@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/rushp4000/lazarr/internal/catalog"
 	"github.com/rushp4000/lazarr/internal/torbox"
@@ -86,6 +87,12 @@ func (s *fakeStore) SetState(hash string, st catalog.State, torboxID int64) erro
 	if r, ok := s.releases[hash]; ok {
 		r.State = st
 		r.TorBoxID = torboxID
+		// Mirror the sqlite store (B1): stamp materialized_at on entry, zero it otherwise.
+		if st == catalog.StateMaterialized {
+			r.MaterializedAt = time.Now().Unix()
+		} else {
+			r.MaterializedAt = 0
+		}
 	}
 	return nil
 }
@@ -118,7 +125,7 @@ func (s *fakeStore) OverMaxHold(before int64) ([]*catalog.Release, error) {
 	defer s.mu.Unlock()
 	var out []*catalog.Release
 	for _, r := range s.releases {
-		if r.State == catalog.StateMaterialized && r.AddedOn < before {
+		if r.State == catalog.StateMaterialized && r.MaterializedAt > 0 && r.MaterializedAt < before {
 			cp := *r
 			out = append(out, &cp)
 		}
@@ -133,6 +140,19 @@ func (s *fakeStore) MaterializedIDs() ([]int64, error) {
 	for _, r := range s.releases {
 		if r.State == catalog.StateMaterialized && r.TorBoxID != 0 {
 			out = append(out, r.TorBoxID)
+		}
+	}
+	return out, nil
+}
+
+func (s *fakeStore) MaterializedReleases() ([]*catalog.Release, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []*catalog.Release
+	for _, r := range s.releases {
+		if r.State == catalog.StateMaterialized {
+			cp := *r
+			out = append(out, &cp)
 		}
 	}
 	return out, nil

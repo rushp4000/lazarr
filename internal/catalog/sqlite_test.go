@@ -67,6 +67,7 @@ func TestUpsertGetRoundTrip(t *testing.T) {
 	s := openTestDB(t)
 	hash := "aabbcc001122334455667788990011223344556677"
 	r := sampleRelease(hash)
+	r.MaterializedAt = 1717000000 // persisted verbatim by UpsertRelease (B1 column)
 	files := sampleFiles(hash)
 
 	require.NoError(t, s.UpsertRelease(r, files))
@@ -85,6 +86,7 @@ func TestUpsertGetRoundTrip(t *testing.T) {
 	assert.Equal(t, r.TorBoxID, got.TorBoxID)
 	assert.Equal(t, r.AddedOn, got.AddedOn)
 	assert.Equal(t, r.LastAccess, got.LastAccess)
+	assert.Equal(t, r.MaterializedAt, got.MaterializedAt)
 	assert.Equal(t, r.CreatedAt, got.CreatedAt)
 
 	// File rows
@@ -287,33 +289,48 @@ func TestIdleCandidates(t *testing.T) {
 	assert.Len(t, candidates, 1)
 }
 
-// ---- OverMaxHold -----------------------------------------------------------
+// ---- OverMaxHold (B1: measured from materialized_at, not added_on) ----------
 
 func TestOverMaxHold(t *testing.T) {
 	s := openTestDB(t)
 
+	// materialized_at ascends while added_on DESCENDS — proving the filter keys off
+	// materialized_at (grab order is the inverse and must be ignored). Rows are upserted
+	// directly as materialized with explicit materialized_at (SetState would stamp NOW).
 	releases := []struct {
-		hash    string
-		addedOn int64
+		hash           string
+		addedOn        int64
+		materializedAt int64
 	}{
-		{"hold0000000000000000000000000000000001", 1000},
-		{"hold0000000000000000000000000000000002", 2000},
-		{"hold0000000000000000000000000000000003", 3000},
+		{"hold0000000000000000000000000000000001", 9000, 1000},
+		{"hold0000000000000000000000000000000002", 8000, 2000},
+		{"hold0000000000000000000000000000000003", 7000, 3000},
 	}
 	for _, tc := range releases {
 		r := sampleRelease(tc.hash)
 		r.AddedOn = tc.addedOn
+		r.State = StateMaterialized
+		r.TorBoxID = 200
+		r.MaterializedAt = tc.materializedAt
 		require.NoError(t, s.UpsertRelease(r, nil))
-		require.NoError(t, s.SetState(tc.hash, StateMaterialized, 200))
 	}
 
-	// Virtual release must NOT appear.
+	// Virtual release must NOT appear, even with an ancient materialized_at.
 	virt := "hold_virt00000000000000000000000000001"
 	rv := sampleRelease(virt)
-	rv.AddedOn = 500
+	rv.MaterializedAt = 1
 	require.NoError(t, s.UpsertRelease(rv, nil))
 
-	// before=2500 → hash with added_on 1000 and 2000 are < 2500.
+	// A materialized row with materialized_at=0 must NOT appear (the > 0 guard): without it
+	// the epoch reads as ancient and the release would be reaped mid-grab (B1).
+	guard := "hold_guard0000000000000000000000000001"
+	rg := sampleRelease(guard)
+	rg.State = StateMaterialized
+	rg.TorBoxID = 201
+	rg.MaterializedAt = 0
+	require.NoError(t, s.UpsertRelease(rg, nil))
+
+	// before=2500 → materialized_at 1000 and 2000 are < 2500 (added_on order is opposite).
 	got, err := s.OverMaxHold(2500)
 	require.NoError(t, err)
 	assert.Len(t, got, 2)
@@ -322,6 +339,41 @@ func TestOverMaxHold(t *testing.T) {
 	got, err = s.OverMaxHold(1000)
 	require.NoError(t, err)
 	assert.Empty(t, got)
+
+	// Far-future cutoff still excludes the virtual row and the materialized_at=0 guard row.
+	got, err = s.OverMaxHold(1 << 40)
+	require.NoError(t, err)
+	assert.Len(t, got, 3, "only the three stamped materialized rows are candidates")
+}
+
+// TestMaterializedAtStampedBySetState proves SetState stamps materialized_at on entry to
+// StateMaterialized and zeroes it on exit (B1), so the max-hold window is measured from
+// materialize time and a released row is never an over-max-hold candidate.
+func TestMaterializedAtStampedBySetState(t *testing.T) {
+	s := openTestDB(t)
+	hash := "matat000000000000000000000000000000001"
+	r := sampleRelease(hash)
+	r.AddedOn = 1 // ancient grab
+	require.NoError(t, s.UpsertRelease(r, nil))
+
+	got, _, err := s.GetRelease(hash)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), got.MaterializedAt, "virtual release has no materialized_at")
+
+	require.NoError(t, s.SetState(hash, StateMaterialized, 7))
+	got, _, err = s.GetRelease(hash)
+	require.NoError(t, err)
+	assert.Greater(t, got.MaterializedAt, int64(0), "materialized_at stamped on entry")
+
+	// Leaving materialized zeroes it; OverMaxHold then never returns it.
+	require.NoError(t, s.SetState(hash, StateVirtual, 0))
+	got, _, err = s.GetRelease(hash)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), got.MaterializedAt, "materialized_at zeroed on exit")
+
+	over, err := s.OverMaxHold(1 << 40)
+	require.NoError(t, err)
+	assert.Empty(t, over, "released (virtual) release is never over-max-hold")
 }
 
 // ---- MaterializedIDs -------------------------------------------------------
