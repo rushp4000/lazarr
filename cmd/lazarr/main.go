@@ -77,7 +77,23 @@ func main() {
 
 	sym := symlink.New(cfg.Paths, cfg.Ownership)
 
-	qsrv := qbit.New(qbit.Deps{Config: cfg, Store: store, TorBox: tb, Symlink: sym})
+	// Phase 2: the lazy playback path — materialize engine, FUSE mount, idle + max-hold
+	// reapers, and the ToS-audit loop. The engine is constructed BEFORE the qbit server and
+	// the mount so it can be wired into both (qbit releases on delete; the mount drives
+	// reads), and so SetMountHealthy lands BEFORE Start (S1: no data race on mountHealthy).
+	eng, err := materialize.New(materialize.Deps{
+		Store:         store,
+		TorBox:        tb,
+		Policy:        cfg.Policy,
+		ProbeCacheDir: cfg.Paths.ProbeCacheDir,
+	})
+	if err != nil {
+		slog.Error("materialize engine", "err", err)
+		os.Exit(1)
+	}
+
+	// qbit gets the engine so torrents/delete releases an in-flight materialization (S2).
+	qsrv := qbit.New(qbit.Deps{Config: cfg, Store: store, TorBox: tb, Symlink: sym, Engine: eng})
 
 	srv := &http.Server{
 		Addr:              cfg.QBit.Listen,
@@ -97,23 +113,10 @@ func main() {
 		}
 	}()
 
-	// Phase 2: the lazy playback path — materialize engine, FUSE mount, idle +
-	// max-hold reapers, and the ToS-audit loop (diff mylist vs the materialized set).
-	eng, err := materialize.New(materialize.Deps{
-		Store:         store,
-		TorBox:        tb,
-		Policy:        cfg.Policy,
-		ProbeCacheDir: cfg.Paths.ProbeCacheDir,
-	})
-	if err != nil {
-		slog.Error("materialize engine", "err", err)
-		os.Exit(1)
-	}
-	eng.Start(ctx) // idle + max-hold reapers; stop on ctx cancel and at eng.Close.
-
 	fsys := vfs.New(cfg.Paths.FuseMount, store, eng)
 	if err := fsys.Mount(); err != nil {
-		// FUSE is the core of Phase 2 — without it nothing can be read/played.
+		// FUSE is the core of Phase 2 — without it nothing can be read/played. Close is safe
+		// here even though Start has not run yet (no reapers to stop, empty track).
 		slog.Error("vfs mount failed (need --cap-add SYS_ADMIN --device /dev/fuse)",
 			"mount", cfg.Paths.FuseMount, "err", err)
 		_ = eng.Close()
@@ -123,8 +126,10 @@ func main() {
 	// Broken-mount guard (CRITICAL): the reapers call Release -> ControlDelete. If the
 	// FUSE mount goes unhealthy on a transient blip the reapers must NOT mass-delete from
 	// the TorBox account. Hand the engine a cheap mount-health probe; the reapers skip a
-	// sweep (logging a Warn) whenever it reports unhealthy.
+	// sweep (logging a Warn) whenever it reports unhealthy. MUST be set before Start so the
+	// reaper goroutine never reads mountHealthy while this writes it (S1).
 	eng.SetMountHealthy(fsys.Healthy)
+	eng.Start(ctx) // idle + max-hold reapers; stop on ctx cancel and at eng.Close.
 
 	// Observability admin server (opt-in, separate port): /metrics (Prometheus) + /health
 	// (JSON). Disabled when metrics.listen is empty. Kept off the arr-facing qbit port; like

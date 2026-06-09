@@ -584,6 +584,37 @@ func TestDeleteMultipleHashes(t *testing.T) {
 	assert.Contains(t, e.symlink.removed, h2)
 }
 
+// fakeReleaser records Release calls for the S2 delete-release test.
+type fakeReleaser struct{ released []string }
+
+func (f *fakeReleaser) Release(hash string) error {
+	f.released = append(f.released, hash)
+	return nil
+}
+
+// TestDeleteReleasesEngine proves torrents/delete calls the engine's Release exactly once
+// per hash (S2) so a delete during playback frees the TorBox item + slot instead of
+// leaking it. Nil-safe: the other delete tests pass no engine and must still pass.
+func TestDeleteReleasesEngine(t *testing.T) {
+	cfg := config.Default()
+	cfg.Categories = []string{"radarr_hin"}
+	rel := &fakeReleaser{}
+	h := qbit.New(qbit.Deps{
+		Config: cfg, Store: newFakeStore(), TorBox: &fakeTorBox{},
+		Symlink: &fakeSymlink{}, Engine: rel,
+	})
+
+	body, ct := formBody("hashes", cachedHash)
+	req := httptest.NewRequest("POST", "/api/v2/torrents/delete", body)
+	req.Header.Set("Content-Type", ct)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	require.Len(t, rel.released, 1, "engine.Release must be called exactly once")
+	assert.Equal(t, cachedHash, rel.released[0])
+}
+
 // TestAddSetsContentPathUnderDownloadDir ensures content_path starts with DownloadDir/category.
 func TestAddSetsContentPathUnderDownloadDir(t *testing.T) {
 	e := newTestEnv(false)

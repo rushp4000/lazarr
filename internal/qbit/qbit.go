@@ -18,6 +18,16 @@ type Deps struct {
 	Store   catalog.Store
 	TorBox  torbox.Client
 	Symlink symlink.Manager
+	// Engine releases an in-flight materialization on torrents/delete so a delete during
+	// playback (upgrade-replace, Phase-4 import churn) frees the TorBox item + slot instead
+	// of leaking it (S2). Optional and nil-safe: qbit tests that wire no engine pass nil.
+	Engine Releaser
+}
+
+// Releaser is the slice of the materialize engine qbit needs: release a materialized
+// release by infohash. Satisfied by *materialize.materializer via its Release method.
+type Releaser interface {
+	Release(hash string) error
 }
 
 // Server is the qBittorrent-emulation HTTP handler. New(Deps) (built by Agent Q)
