@@ -4,11 +4,14 @@
 package qbit
 
 import (
+	"encoding/base32"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"path"
 	"strings"
 	"time"
@@ -252,6 +255,16 @@ func (s *server) handleTorrentsAdd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	hash = strings.ToLower(hash)
+
+	// Infohash becomes the <hash> segment of the symlink TARGET
+	// (<fuse_mount>/<hash>/<rel_path>), so it must be a real infohash and never
+	// a path-traversal payload (docs/15 §4.C). parseMagnet/parseTorrentFile
+	// already normalize to 40-hex, but validate here as the single chokepoint.
+	if !isInfohash(hash) {
+		slog.Warn("qbit: torrents/add invalid infohash", "hash", hash)
+		http.Error(w, "invalid infohash", http.StatusBadRequest)
+		return
+	}
 
 	if name == "" {
 		name = hash // fallback
@@ -679,8 +692,9 @@ func (s *server) handleTransferInfo(w http.ResponseWriter, _ *http.Request) {
 
 // ── magnet / torrent parsing ──────────────────────────────────────────────────
 
-// parseMagnet extracts infohash and display name from a magnet URI.
-// Returns ("", "") on failure.
+// parseMagnet extracts the infohash (normalized to 40-char lowercase hex) and
+// display name from a magnet URI. Returns ("", "") if there is no valid btih
+// infohash. Both hex (40-char) and base32 (32-char) infohashes are accepted.
 func parseMagnet(magnet string) (hash, name string) {
 	// magnet:?xt=urn:btih:<hash>&dn=<name>&...
 	rest := strings.TrimPrefix(magnet, "magnet:?")
@@ -693,11 +707,9 @@ func parseMagnet(magnet string) (hash, name string) {
 		v := strings.TrimSpace(kv[1])
 		switch k {
 		case "xt":
-			// urn:btih:<hash>
-			if prefix, h, found := strings.Cut(v, "btih:"); found {
-				_ = prefix
-				hash = strings.ToLower(h)
-				// btih can be base32 (40 chars) — only hex (40 lower hex) is used here.
+			// urn:btih:<hash> — hex or base32.
+			if _, h, found := strings.Cut(v, "btih:"); found {
+				hash = normalizeInfohash(h)
 			}
 		case "dn":
 			name = urlDecode(v)
@@ -706,24 +718,47 @@ func parseMagnet(magnet string) (hash, name string) {
 	return
 }
 
-// urlDecode is a minimal percent+plus decoder for magnet URIs.
-func urlDecode(s string) string {
-	s = strings.ReplaceAll(s, "+", " ")
-	// Use fmt.Sscanf-style hex decode for %XX sequences.
-	var b strings.Builder
-	for i := 0; i < len(s); {
-		if s[i] == '%' && i+2 < len(s) {
-			var b1 byte
-			if n, _ := fmt.Sscanf(s[i+1:i+3], "%02x", &b1); n == 1 {
-				b.WriteByte(b1)
-				i += 3
-				continue
-			}
+// normalizeInfohash returns s as a 40-char lowercase hex infohash, converting a
+// 32-char base32 (RFC 4648) infohash to hex. Returns "" if s is neither a valid
+// 40-hex nor a valid 32-base32 infohash. This is the traversal guard for the
+// <hash> path segment (docs/15 §4.C).
+func normalizeInfohash(s string) string {
+	switch len(strings.TrimSpace(s)) {
+	case 40:
+		l := strings.ToLower(strings.TrimSpace(s))
+		if isInfohash(l) {
+			return l
 		}
-		b.WriteByte(s[i])
-		i++
+	case 32:
+		// base32 is case-insensitive; std encoding is uppercase, unpadded.
+		if b, err := base32.StdEncoding.DecodeString(strings.ToUpper(strings.TrimSpace(s))); err == nil && len(b) == 20 {
+			return hex.EncodeToString(b)
+		}
 	}
-	return b.String()
+	return ""
+}
+
+// isInfohash reports whether s is exactly 40 lowercase hex chars (a SHA-1 btih).
+func isInfohash(s string) bool {
+	if len(s) != 40 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	return true
+}
+
+// urlDecode percent/plus-decodes a magnet field (e.g. dn), falling back to the
+// raw value when it is not valid percent-encoding.
+func urlDecode(s string) string {
+	if d, err := url.QueryUnescape(s); err == nil {
+		return d
+	}
+	return s
 }
 
 // maxTorrentBytes caps a .torrent upload so a hostile/oversized file cannot

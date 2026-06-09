@@ -32,8 +32,12 @@ type sqliteStore struct {
 // OpenSQLite opens (or creates) the SQLite database at path and returns a
 // Store. Migrations are idempotent (CREATE TABLE IF NOT EXISTS).
 func OpenSQLite(path string) (Store, error) {
-	// The modernc driver name is "sqlite".
-	db, err := sql.Open("sqlite", path)
+	// Set pragmas via the DSN so they apply to EVERY connection the pool opens,
+	// not just the first — robust even if the pool is later resized (docs/15
+	// §4.G). applyPragmas below remains as belt-and-suspenders. The modernc
+	// driver name is "sqlite"; _pragma values use the func(arg) form.
+	dsn := "file:" + path + "?" + dsnPragmas
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("catalog: open sqlite %q: %w", path, err)
 	}
@@ -53,6 +57,12 @@ func OpenSQLite(path string) (Store, error) {
 
 	return &sqliteStore{db: db}, nil
 }
+
+// dsnPragmas are the per-connection pragmas, applied via the DSN query string so
+// they survive any future pool resize (see OpenSQLite). foreign_keys + WAL are
+// the load-bearing ones; busy_timeout makes concurrent writers retry.
+const dsnPragmas = "_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&" +
+	"_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)"
 
 func applyPragmas(db *sql.DB) error {
 	pragmas := []string{
