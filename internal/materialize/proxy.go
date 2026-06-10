@@ -44,6 +44,17 @@ var errSSRFBlocked = errors.New("materialize: CDN URL blocked by host-pin/SSRF p
 // playback must not burn a link refresh.
 var errCDNUnreachable = errors.New("materialize: CDN host unreachable")
 
+// errCDNThrottled marks an HTTP 429 from the CDN: the presigned link is fine, the
+// node is just rate-limiting a parallel burst (observed live 2026-06-10 once
+// readahead pushed ~18 MB/s: foreground reads started 429ing). Refreshing the link
+// would not help — the right move is a short backoff + retry, and keeping prefetch
+// concurrency modest (see prefetcher semaphore).
+var errCDNThrottled = errors.New("materialize: CDN throttled (HTTP 429)")
+
+// throttleBackoffs are the waits between 429 retries on the FOREGROUND read path.
+// Two retries cover a transient burst limit without stalling a player visibly.
+var throttleBackoffs = []time.Duration{300 * time.Millisecond, 900 * time.Millisecond}
+
 // proxy issues SSRF-safe ranged GETs to the presigned CDN URL. Security (docs/15 §4.F):
 //   - require https + pin the host to *.tb-cdn.io (plus a configurable allowlist),
 //   - refuse private/loopback/link-local IPs at BOTH the URL-validation stage AND at dial
@@ -197,6 +208,17 @@ func (m *materializer) proxyRead(ctx context.Context, ent *entry, fileID int, p 
 	}
 
 	n, body, err := m.prox.getRange(ctx, link.URL, p, off, m.probe != nil)
+
+	// 429 burst limit: back off briefly and retry the SAME link (it is valid; the
+	// node is pacing us). Bounded — after the backoff budget the error surfaces.
+	for attempt := 0; errors.Is(err, errCDNThrottled) && attempt < len(throttleBackoffs); attempt++ {
+		select {
+		case <-ctx.Done():
+			return 0, nil, ctx.Err()
+		case <-time.After(throttleBackoffs[attempt]):
+		}
+		n, body, err = m.prox.getRange(ctx, link.URL, p, off, m.probe != nil)
+	}
 	if err == nil {
 		return n, body, nil
 	}
@@ -315,6 +337,9 @@ func (p *proxy) getRange(ctx context.Context, rawURL string, dst []byte, off int
 			return 0, nil, fmt.Errorf("materialize: CDN ignored Range (HTTP 200) at offset %d", off)
 		}
 	default:
+		if resp.StatusCode == http.StatusTooManyRequests {
+			return 0, nil, errCDNThrottled
+		}
 		if isRefreshStatus(resp.StatusCode) {
 			return 0, nil, torbox.ErrLinkExpired
 		}

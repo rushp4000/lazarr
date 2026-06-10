@@ -45,18 +45,28 @@ type prefetcher struct {
 	windows  int // prefetch depth (config policy.readahead_windows)
 	capacity int // max cached chunks (global bound)
 
+	// sem caps CONCURRENT background fetches. TorBox's CDN 429s parallel bursts
+	// (observed live at ~18 MB/s with unbounded parallelism); three in-flight
+	// prefetches + the foreground read stay under the limit while still pipelining.
+	sem chan struct{}
+
 	// fetch retrieves one whole chunk (short at EOF). Wired to the engine's
 	// proxyRead; the entry must be pinned by the caller for the fetch duration.
 	fetch func(ctx context.Context, ent *entry, fileID int, buf []byte, off int64) (int, error)
 }
 
 func newPrefetcher(windows int, fetch func(ctx context.Context, ent *entry, fileID int, buf []byte, off int64) (int, error)) *prefetcher {
+	conc := 3
+	if windows < conc {
+		conc = windows
+	}
 	return &prefetcher{
 		cache:    make(map[chunkKey][]byte),
 		inflight: make(map[chunkKey]chan struct{}),
 		streams:  make(map[streamKey]*streamState),
 		windows:  windows,
 		capacity: windows * 8, // e.g. 4 windows -> 32 MiB ceiling across all streams
+		sem:      make(chan struct{}, conc),
 		fetch:    fetch,
 	}
 }
@@ -215,6 +225,8 @@ func (p *prefetcher) prefetchAsync(m *materializer, hash string, fileID int, idx
 			close(ch)
 			p.mu.Unlock()
 		}()
+		p.sem <- struct{}{} // concurrency cap (CDN 429s parallel bursts)
+		defer func() { <-p.sem }()
 		ctx := context.Background()
 		ent, err := m.ensureMaterialized(ctx, hash)
 		if err != nil {
