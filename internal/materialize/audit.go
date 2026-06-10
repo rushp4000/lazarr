@@ -19,14 +19,23 @@ import (
 //
 // Returns an error only on an API failure; a detected leak is logged/alarmed, not returned
 // as an error (a leak is an operational alarm, not a call failure).
+// auditDriftGrace suppresses the drift WARN for items materialized very recently:
+// TorBox's mylist lags a fresh createtorrent by up to ~a minute even with
+// bypass_cache=true (observed live 2026-06-10: add at 05:06:10, mylist still
+// missing it at the 05:07:12 audit, present minutes later). A fresh add that has
+// not propagated yet is not drift.
+const auditDriftGrace = 10 * 60 // seconds
+
 func (m *materializer) AuditTOS() error {
-	believed, err := m.store.MaterializedIDs()
+	matRels, err := m.store.MaterializedReleases()
 	if err != nil {
-		return fmt.Errorf("materialize: audit: materialized ids: %w", err)
+		return fmt.Errorf("materialize: audit: materialized releases: %w", err)
 	}
-	believedSet := make(map[int64]struct{}, len(believed))
-	for _, id := range believed {
-		believedSet[id] = struct{}{}
+	believedSet := make(map[int64]struct{}, len(matRels))
+	matAt := make(map[int64]int64, len(matRels)) // id -> MaterializedAt (drift grace)
+	for _, r := range matRels {
+		believedSet[r.TorBoxID] = struct{}{}
+		matAt[r.TorBoxID] = r.MaterializedAt
 	}
 
 	// Lazarr's scope = ids we currently believe held + ids we ever added this lifetime.
@@ -77,8 +86,15 @@ func (m *materializer) AuditTOS() error {
 	}
 	// Drift (informational): we believe an id is held but the account does not have it
 	// (TorBox purged it, or an out-of-band delete). Not a ToS violation; surfaced for ops.
+	// Items materialized within the grace window are skipped — mylist propagation lag,
+	// not drift.
+	now := m.now().Unix()
 	for id := range believedSet {
 		if _, ok := held[id]; !ok {
+			if at, known := matAt[id]; known && at > 0 && now-at < auditDriftGrace {
+				m.log.Debug("TOS AUDIT: fresh add not yet visible in mylist (grace)", "torbox_id", id)
+				continue
+			}
 			missing++
 			m.log.Warn("TOS AUDIT: materialized id not present on account (drift)", "torbox_id", id)
 		}
