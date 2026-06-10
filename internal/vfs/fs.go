@@ -89,7 +89,22 @@ func (f *FS) Mount() error {
 
 	srv, err := fs.Mount(f.mount, root, opts)
 	if err != nil {
-		return err
+		// A prior instance killed with SIGKILL (or any unclean exit) leaves a stale FUSE
+		// mount whose kernel connection is dead — stat returns ENOTCONN ("transport endpoint
+		// is not connected") and fs.Mount cannot mount over it, so the daemon would
+		// crash-loop on every restart. Detach the dead mount (lazy) and retry once so a
+		// hard-crashed daemon recovers automatically. This is critical for B2: boot
+		// reconciliation (which releases TorBox leftovers) runs only AFTER a successful
+		// mount, so a wedged remount would otherwise pin the very leak reconcile must clear.
+		if isStaleMount(f.mount) {
+			slog.Warn("vfs: clearing stale FUSE mount left by a prior unclean exit, retrying",
+				"path", f.mount)
+			_ = syscall.Unmount(f.mount, syscall.MNT_DETACH)
+			srv, err = fs.Mount(f.mount, root, opts)
+		}
+		if err != nil {
+			return err
+		}
 	}
 
 	f.mu.Lock()
@@ -98,6 +113,14 @@ func (f *FS) Mount() error {
 
 	slog.Info("vfs mounted", "path", f.mount)
 	return nil
+}
+
+// isStaleMount reports whether path is a dead/stale FUSE mount whose kernel connection is
+// gone — the state a SIGKILL'd FUSE daemon leaves behind. The kernel surfaces it as ENOTCONN
+// ("transport endpoint is not connected") on any stat of the mount root.
+func isStaleMount(path string) bool {
+	_, err := os.Stat(path)
+	return errors.Is(err, syscall.ENOTCONN)
 }
 
 // Close unmounts the FUSE filesystem cleanly.  Any in-flight operations are

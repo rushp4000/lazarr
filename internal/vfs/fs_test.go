@@ -506,3 +506,4 @@ func TestStatDoesNotMaterialize_RaceDetector(t *testing.T) {
 
 	assert.Zero(t, mat.callCount(), "concurrent stats must not trigger the Materializer")
 }
+
