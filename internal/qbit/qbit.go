@@ -4,6 +4,7 @@
 package qbit
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/rushp4000/lazarr/internal/catalog"
@@ -34,4 +35,7 @@ type Releaser interface {
 // returns something satisfying http.Handler, mounting /api/v2/* per docs/03.
 type Server interface {
 	http.Handler
+	// StartWaitPoller launches the on_cache_miss=wait background watcher (one cheap
+	// store query per tick when idle). Call once from main; stops with ctx.
+	StartWaitPoller(ctx context.Context)
 }

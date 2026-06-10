@@ -10,6 +10,10 @@ const (
 	StateVirtual      State = "virtual"      // symlinked, NOT on TorBox
 	StateMaterialized State = "materialized" // added to TorBox, streamable
 	StateError        State = "error"        // checkcached/torrentinfo failed, or dead-cache
+	// StateDownloading: on_cache_miss=wait — TorBox is fetching the uncached torrent;
+	// the qbit wait-poller watches progress/ETA and flips it to virtual (released,
+	// now cached) or error (over budget / stalled). The item IS on the account.
+	StateDownloading State = "downloading"
 )
 
 // CacheStatus reports whether the content is still available on TorBox's CDN.
@@ -94,6 +98,10 @@ type Store interface {
 	// MaterializedReleases returns all releases currently in StateMaterialized. Drives the
 	// boot-time reconciliation sweep that releases crash/restart leftovers (B2).
 	MaterializedReleases() ([]*Release, error)
+	// DownloadingReleases returns releases in StateDownloading (on_cache_miss=wait).
+	// The qbit wait-poller resumes these after a restart; the ToS audit counts them
+	// as legitimately held.
+	DownloadingReleases() ([]*Release, error)
 	// ListAllHashes returns every hash in the catalog. Used by the repair scanner to
 	// batch-check availability with TorBox's checkcached endpoint (no TorBox adds).
 	ListAllHashes() ([]string, error)

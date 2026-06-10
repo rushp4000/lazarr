@@ -37,6 +37,17 @@ func (m *materializer) AuditTOS() error {
 		believedSet[r.TorBoxID] = struct{}{}
 		matAt[r.TorBoxID] = r.MaterializedAt
 	}
+	// on_cache_miss=wait downloads legitimately sit on the account while TorBox
+	// fetches them — believed-held, never a leak. The qbit wait-poller owns their
+	// removal (complete or bail).
+	dlRels, err := m.store.DownloadingReleases()
+	if err != nil {
+		return fmt.Errorf("materialize: audit: downloading releases: %w", err)
+	}
+	for _, r := range dlRels {
+		believedSet[r.TorBoxID] = struct{}{}
+		matAt[r.TorBoxID] = r.MaterializedAt
+	}
 
 	// Lazarr's scope = ids we currently believe held + ids we ever added this lifetime.
 	scope := make(map[int64]struct{}, len(believedSet))

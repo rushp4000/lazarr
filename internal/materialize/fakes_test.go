@@ -162,6 +162,19 @@ func (s *fakeStore) MaterializedReleases() ([]*catalog.Release, error) {
 	return out, nil
 }
 
+func (s *fakeStore) DownloadingReleases() ([]*catalog.Release, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []*catalog.Release
+	for _, r := range s.releases {
+		if r.State == catalog.StateDownloading {
+			cp := *r
+			out = append(out, &cp)
+		}
+	}
+	return out, nil
+}
+
 func (s *fakeStore) GetLink(hash string, fileID int) (*catalog.DLLink, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

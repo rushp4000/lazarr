@@ -93,8 +93,18 @@ func (f *fakeStore) OverMaxHold(before int64) ([]*catalog.Release, error)    { r
 func (f *fakeStore) ListReleases(_ catalog.ReleaseFilter) ([]*catalog.Release, int, error) {
 	return nil, 0, nil
 }
-func (f *fakeStore) MaterializedIDs() ([]int64, error)                        { return nil, nil }
-func (f *fakeStore) MaterializedReleases() ([]*catalog.Release, error)        { return nil, nil }
+func (f *fakeStore) MaterializedIDs() ([]int64, error)                 { return nil, nil }
+func (f *fakeStore) MaterializedReleases() ([]*catalog.Release, error) { return nil, nil }
+func (f *fakeStore) DownloadingReleases() ([]*catalog.Release, error) {
+	var out []*catalog.Release
+	for _, r := range f.releases {
+		if r.State == catalog.StateDownloading {
+			cp := *r
+			out = append(out, &cp)
+		}
+	}
+	return out, nil
+}
 func (f *fakeStore) GetLink(hash string, fileID int) (*catalog.DLLink, error) { return nil, nil }
 func (f *fakeStore) SetLink(l *catalog.DLLink) error                          { return nil }
 
@@ -115,6 +125,13 @@ type fakeTorBox struct {
 	checkCachedCalls [][]string
 	torrentInfoCalls []string
 	createCalls      []string
+
+	// wait-mode seams
+	createOK     bool                                 // CreateTorrent succeeds with id 9001
+	createCached []bool                               // recorded addOnlyIfCached args
+	nowCached    map[string]bool                      // extra CheckCached hits (post-download)
+	myListByIDFn func(id int64) *torbox.TorrentDetail // poller progress responses
+	deletedIDs   []int64                              // ControlDelete calls
 }
 
 func (f *fakeTorBox) CheckCached(hashes []string) (map[string]torbox.CachedItem, error) {
@@ -146,6 +163,16 @@ func (f *fakeTorBox) CheckCached(hashes []string) (map[string]torbox.CachedItem,
 			}
 			// uncachedHash → no entry in result (miss)
 		}
+		if f.nowCached != nil && f.nowCached[h] {
+			result[h] = torbox.CachedItem{
+				Hash: h,
+				Name: "Waited Release",
+				Size: 4096,
+				Files: []torbox.CachedFile{
+					{ID: 0, Name: "Waited Release/file.mkv", Size: 4096},
+				},
+			}
+		}
 	}
 	return result, nil
 }
@@ -168,14 +195,26 @@ func (f *fakeTorBox) TorrentInfo(hash string) (*torbox.CachedItem, error) {
 
 func (f *fakeTorBox) CreateTorrent(magnet string, addOnlyIfCached bool) (int64, string, error) {
 	f.createCalls = append(f.createCalls, magnet)
+	f.createCached = append(f.createCached, addOnlyIfCached)
+	if f.createOK {
+		return 9001, "", nil
+	}
 	return 0, "", fmt.Errorf("not implemented in fake")
 }
 
 func (f *fakeTorBox) RequestDL(torrentID int64, fileID int) (string, error) { return "", nil }
-func (f *fakeTorBox) ControlDelete(torrentID int64) error                   { return nil }
-func (f *fakeTorBox) MyList(offset int) ([]torbox.TorrentDetail, error)     { return nil, nil }
-func (f *fakeTorBox) MyListByID(id int64) (*torbox.TorrentDetail, error)    { return nil, nil }
-func (f *fakeTorBox) UserMe() (*torbox.Account, error)                      { return &torbox.Account{Plan: 1}, nil }
+func (f *fakeTorBox) ControlDelete(torrentID int64) error {
+	f.deletedIDs = append(f.deletedIDs, torrentID)
+	return nil
+}
+func (f *fakeTorBox) MyList(offset int) ([]torbox.TorrentDetail, error) { return nil, nil }
+func (f *fakeTorBox) MyListByID(id int64) (*torbox.TorrentDetail, error) {
+	if f.myListByIDFn != nil {
+		return f.myListByIDFn(id), nil
+	}
+	return nil, nil
+}
+func (f *fakeTorBox) UserMe() (*torbox.Account, error) { return &torbox.Account{Plan: 1}, nil }
 
 // fakeSymlink implements symlink.Manager, recording calls.
 type fakeSymlink struct {

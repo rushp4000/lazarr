@@ -456,6 +456,19 @@ func (s *sqliteStore) MaterializedReleases() ([]*Release, error) {
 	return collectReleases(rows)
 }
 
+func (s *sqliteStore) DownloadingReleases() ([]*Release, error) {
+	rows, err := s.db.Query(`
+		SELECT hash, name, category, magnet, total_size, state, cached,
+		       torbox_id, added_on, last_access, materialized_at, created_at,
+		       cache_status, last_cache_check
+		FROM release WHERE state = 'downloading'`)
+	if err != nil {
+		return nil, fmt.Errorf("catalog: downloading releases: %w", err)
+	}
+	defer rows.Close()
+	return collectReleases(rows)
+}
+
 // MaterializedIDs returns TorBox IDs for all materialized releases (ToS audit).
 func (s *sqliteStore) MaterializedIDs() ([]int64, error) {
 	rows, err := s.db.Query(

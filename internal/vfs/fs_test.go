@@ -73,6 +73,7 @@ func (s *fakeStore) ListReleases(_ catalog.ReleaseFilter) ([]*catalog.Release, i
 }
 func (s *fakeStore) MaterializedIDs() ([]int64, error)                             { return nil, nil }
 func (s *fakeStore) MaterializedReleases() ([]*catalog.Release, error)             { return nil, nil }
+func (s *fakeStore) DownloadingReleases() ([]*catalog.Release, error)              { return nil, nil }
 func (s *fakeStore) GetLink(_ string, _ int) (*catalog.DLLink, error)              { return nil, nil }
 func (s *fakeStore) SetLink(_ *catalog.DLLink) error                               { return nil }
 func (s *fakeStore) DeleteRelease(_ string) error                                  { return nil }

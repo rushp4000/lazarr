@@ -127,6 +127,10 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// on_cache_miss=wait watcher (no-op when nothing is downloading). Also resumes
+	// any StateDownloading rows left by a restart.
+	qsrv.StartWaitPoller(ctx)
+
 	go func() {
 		slog.Info("qbit listening", "addr", cfg.QBit.Listen)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -435,6 +439,10 @@ func (p *webuiProvider) GetSettings() webui.Settings {
 		MaxHold:          c.Policy.MaxHold.D().String(),
 		ActiveSlots:      c.Policy.ActiveSlots,
 		ProbeCache:       c.Policy.ProbeCache,
+		OnCacheMiss:      effectiveCacheMiss(c.Policy.OnCacheMiss),
+		CacheWaitBudget:  c.Policy.CacheWaitBudget.D().String(),
+		MaxWaitDownloads: c.Policy.MaxWaitDownloads,
+		ReadaheadWindows: c.Policy.ReadaheadWindows,
 		PUID:             c.Ownership.PUID,
 		PGID:             c.Ownership.PGID,
 		MetricsListen:    c.Metrics.Listen,
@@ -448,6 +456,14 @@ func (p *webuiProvider) GetSettings() webui.Settings {
 func effectiveLogLevel(s string) string {
 	if s == "" {
 		return "info"
+	}
+	return s
+}
+
+// effectiveCacheMiss normalizes "" to "error" for display.
+func effectiveCacheMiss(s string) string {
+	if s == "" {
+		return "error"
 	}
 	return s
 }
@@ -492,6 +508,16 @@ func (p *webuiProvider) SaveSettings(s webui.Settings) (bool, error) {
 	nc.Policy.MaxHold = config.Duration(hold)
 	nc.Policy.ActiveSlots = s.ActiveSlots
 	nc.Policy.ProbeCache = s.ProbeCache
+	nc.Policy.OnCacheMiss = s.OnCacheMiss
+	if s.CacheWaitBudget != "" {
+		budget, berr := time.ParseDuration(s.CacheWaitBudget)
+		if berr != nil {
+			return false, fmt.Errorf("cache wait budget %q: %w", s.CacheWaitBudget, berr)
+		}
+		nc.Policy.CacheWaitBudget = config.Duration(budget)
+	}
+	nc.Policy.MaxWaitDownloads = s.MaxWaitDownloads
+	nc.Policy.ReadaheadWindows = s.ReadaheadWindows
 	nc.Ownership.PUID = s.PUID
 	nc.Ownership.PGID = s.PGID
 	nc.Metrics.Listen = s.MetricsListen

@@ -60,6 +60,37 @@ type Policy struct {
 	MaxHold       Duration `yaml:"max_hold"`
 	ActiveSlots   int      `yaml:"active_slots"` // 0 = auto-detect from /user/me; else your plan's slots
 	ProbeCache    bool     `yaml:"probe_cache"`
+
+	// OnCacheMiss decides what happens when an arr grabs a release TorBox has NOT
+	// cached (only consulted when AllowUncached is false — with AllowUncached true
+	// every grab is accepted):
+	//   "error"  (default) — accept the grab and surface it as a qBit error state;
+	//             the arr shows a warning until something (Cleanuparr, a human, or
+	//             the repair tab) removes it.
+	//   "reject" — refuse the add outright; the arr immediately falls back to the
+	//             next release in its decision list. Cleanest queues, but repeated
+	//             rejections can trip the arr's download-client backoff.
+	//   "wait"   — start the TorBox download and watch it: if TorBox's reported ETA
+	//             stays within CacheWaitBudget the grab is held in "downloading"
+	//             state (real progress reported to the arr) until cached, then the
+	//             torrent is RELEASED from the account (the content is now in
+	//             TorBox's cache) and the grab completes as a normal lazy import.
+	//             If the ETA exceeds the budget or the download stalls, it is
+	//             deleted and the grab goes to error state.
+	OnCacheMiss string `yaml:"on_cache_miss"`
+	// CacheWaitBudget is the max time a "wait" download may need (TorBox ETA) before
+	// Lazarr bails on it. Only used when OnCacheMiss == "wait".
+	CacheWaitBudget Duration `yaml:"cache_wait_budget"`
+	// MaxWaitDownloads caps concurrent "wait" downloads (each holds a TorBox slot
+	// while downloading). Overflow misses fall back to error state.
+	MaxWaitDownloads int `yaml:"max_wait_downloads"`
+
+	// ReadaheadWindows is the number of 1 MiB windows prefetched in parallel ahead
+	// of a sequential read (per open stream). 0 disables prefetch (each read is one
+	// serial CDN round-trip ≈ 5-8 MB/s). 4-8 is the 4K-streaming range; memory cost
+	// is ReadaheadWindows MiB per active stream and discarded prefetches count
+	// against TorBox bandwidth.
+	ReadaheadWindows int `yaml:"readahead_windows"`
 }
 
 // Ownership controls the privilege model for the symlink tree (docs/05 §5).
@@ -118,11 +149,15 @@ func Default() *Config {
 		TorBox: TorBox{APIBase: constants.TorBoxAPIBase},
 		QBit:   QBit{Listen: ":8080", Username: "lazarr", Password: "lazarr"},
 		Policy: Policy{
-			AllowUncached: false,
-			IdleTTL:       Duration(constants.DefaultIdleTTL),
-			MaxHold:       Duration(constants.DefaultMaxHold),
-			ActiveSlots:   constants.DefaultActiveSlots,
-			ProbeCache:    true,
+			AllowUncached:    false,
+			IdleTTL:          Duration(constants.DefaultIdleTTL),
+			MaxHold:          Duration(constants.DefaultMaxHold),
+			ActiveSlots:      constants.DefaultActiveSlots,
+			ProbeCache:       true,
+			OnCacheMiss:      "error",
+			CacheWaitBudget:  Duration(15 * time.Minute),
+			MaxWaitDownloads: 1,
+			ReadaheadWindows: 4,
 		},
 	}
 }
@@ -198,6 +233,22 @@ func (c *Config) validate() error {
 	// (e) webui basic auth: both username AND password must be set, or neither.
 	if (c.WebUI.Username == "") != (c.WebUI.Password == "") {
 		return fmt.Errorf("webui.username and webui.password must both be set or both be empty")
+	}
+
+	// (f2) on_cache_miss must be a recognized mode (empty = error).
+	switch c.Policy.OnCacheMiss {
+	case "", "error", "reject", "wait":
+	default:
+		return fmt.Errorf("on_cache_miss %q must be one of error|reject|wait", c.Policy.OnCacheMiss)
+	}
+	if c.Policy.OnCacheMiss == "wait" && c.Policy.CacheWaitBudget.D() <= 0 {
+		return fmt.Errorf("cache_wait_budget must be > 0 when on_cache_miss is \"wait\"")
+	}
+	if c.Policy.MaxWaitDownloads < 0 {
+		return fmt.Errorf("max_wait_downloads (%d) must be >= 0", c.Policy.MaxWaitDownloads)
+	}
+	if c.Policy.ReadaheadWindows < 0 || c.Policy.ReadaheadWindows > 32 {
+		return fmt.Errorf("readahead_windows (%d) must be 0..32", c.Policy.ReadaheadWindows)
 	}
 
 	// (f) log_level must be a recognized name (empty = info).

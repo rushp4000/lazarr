@@ -60,6 +60,11 @@ type materializer struct {
 
 	prox *proxy // SSRF-safe range proxy
 
+	// pf is the parallel readahead layer (nil when policy.readahead_windows == 0).
+	// Serves bulk sequential reads from chunk-aligned windows fetched concurrently —
+	// the 4K-throughput path (DIRECT_IO disables kernel readahead, so it's ours to do).
+	pf *prefetcher
+
 	// mountHealthy is an optional broken-mount guard, set from main via SetMountHealthy.
 	// When non-nil and it returns false, the idle/max-hold reapers SKIP their sweep
 	// instead of calling ControlDelete — a transient FUSE blip must never trigger a mass
@@ -165,6 +170,14 @@ func New(d Deps) (*materializer, error) {
 		} else {
 			m.probe = pc
 		}
+	}
+
+	if d.Policy.ReadaheadWindows > 0 {
+		m.pf = newPrefetcher(d.Policy.ReadaheadWindows,
+			func(ctx context.Context, ent *entry, fileID int, buf []byte, off int64) (int, error) {
+				n, _, err := m.proxyRead(ctx, ent, fileID, buf, off)
+				return n, err
+			})
 	}
 
 	return m, nil
@@ -356,6 +369,20 @@ func (m *materializer) ReadAt(hash string, fileID int, p []byte, off int64) (int
 			return n, nil
 		}
 		metrics.IncProbeMiss()
+	}
+
+	// Bulk/sequential reads go through the readahead layer (parallel chunk windows).
+	// Probe-region reads stay on the direct path above/below so the header cache keeps
+	// getting populated exactly as before.
+	if m.pf != nil && !(m.probe != nil && m.probe.covers(off, int64(len(p)))) {
+		n, err := m.pf.read(ctx, m, ent, fileID, p, off)
+		if err != nil {
+			if errors.Is(err, torbox.ErrNotFound) {
+				return 0, m.markPurged(hash)
+			}
+			return 0, err
+		}
+		return n, nil
 	}
 
 	// 3+4. Resolve a fresh link and range-proxy the window (with one refresh-on-4xx retry).
@@ -660,7 +687,10 @@ func (m *materializer) release(hash string, force bool) error {
 		err = errors.Join(err, fmt.Errorf("materialize: set virtual %s: %w", short(hash), serr))
 	}
 
-	// Free the slot this release was holding.
+	// Free the slot this release was holding (+ any readahead memory).
+	if m.pf != nil {
+		m.pf.invalidate(hash)
+	}
 	m.releaseSlot()
 	if err == nil {
 		metrics.IncReleases()
