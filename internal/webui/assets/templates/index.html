@@ -1,0 +1,700 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Lazarr — Dashboard</title>
+<style>
+/* minimal reset + layout */
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{font-family:system-ui,sans-serif;font-size:14px;background:#0f1117;color:#cdd6f4;min-height:100vh}
+a{color:#89b4fa;text-decoration:none}
+a:hover{text-decoration:underline}
+
+/* nav */
+nav{background:#1e1e2e;border-bottom:1px solid #313244;padding:0 24px;display:flex;align-items:center;gap:24px;height:48px}
+nav .brand{font-weight:700;font-size:16px;color:#cba6f7;letter-spacing:.5px}
+nav button{background:none;border:none;color:#cdd6f4;cursor:pointer;padding:4px 8px;border-radius:4px;font-size:13px}
+nav button:hover,nav button.active{background:#313244;color:#89b4fa}
+
+/* layout */
+main{max-width:1280px;margin:0 auto;padding:24px}
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px;margin-bottom:24px}
+
+/* cards */
+.card{background:#1e1e2e;border:1px solid #313244;border-radius:8px;padding:16px}
+.card h2{font-size:13px;font-weight:600;text-transform:uppercase;letter-spacing:.8px;color:#6c7086;margin-bottom:12px}
+
+/* stat */
+.stat{display:flex;flex-direction:column;gap:2px}
+.stat .val{font-size:28px;font-weight:700;color:#cba6f7}
+.stat .lbl{font-size:12px;color:#6c7086}
+.stats-row{display:flex;gap:24px;flex-wrap:wrap;margin-bottom:8px}
+
+/* badge */
+.badge{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:999px;font-size:12px;font-weight:600}
+.badge.green{background:#1a2a20;color:#a6e3a1;border:1px solid #a6e3a1}
+.badge.red{background:#2a1a1a;color:#f38ba8;border:1px solid #f38ba8}
+.badge.yellow{background:#2a2615;color:#f9e2af;border:1px solid #f9e2af}
+.badge.blue{background:#17203a;color:#89b4fa;border:1px solid #89b4fa}
+.badge.gray{background:#1e1e2e;color:#6c7086;border:1px solid #45475a}
+
+/* table */
+.table-wrap{overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{text-align:left;padding:8px 12px;color:#6c7086;font-weight:600;border-bottom:1px solid #313244;white-space:nowrap}
+td{padding:8px 12px;border-bottom:1px solid #181825;vertical-align:middle}
+tr:last-child td{border-bottom:none}
+tr:hover td{background:#181825}
+.hash{font-family:monospace;font-size:12px;color:#89b4fa}
+.name-cell{max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* search bar */
+.filter-row{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;align-items:center}
+.filter-row input,.filter-row select{background:#181825;border:1px solid #313244;color:#cdd6f4;padding:6px 10px;border-radius:6px;font-size:13px;outline:none}
+.filter-row input:focus,.filter-row select:focus{border-color:#89b4fa}
+.filter-row input{min-width:200px}
+
+/* buttons */
+button.btn{cursor:pointer;padding:5px 12px;border-radius:6px;border:1px solid #313244;font-size:12px;font-weight:600;background:#181825;color:#cdd6f4;transition:background .15s}
+button.btn:hover{background:#313244}
+button.btn.danger{border-color:#f38ba8;color:#f38ba8}
+button.btn.danger:hover{background:#2a1a1a}
+button.btn.primary{border-color:#89b4fa;color:#89b4fa}
+button.btn.primary:hover{background:#17203a}
+button.btn:disabled{opacity:.4;cursor:not-allowed}
+
+/* section visibility */
+.section{display:none}
+.section.active{display:block}
+
+/* sparkline bars */
+.sparkbar-row{display:flex;gap:12px;flex-wrap:wrap}
+.sparkbar{display:flex;flex-direction:column;gap:4px;min-width:100px}
+.sparkbar .lbl{font-size:11px;color:#6c7086}
+.sparkbar .bar-wrap{height:6px;background:#313244;border-radius:3px;overflow:hidden}
+.sparkbar .bar-fill{height:100%;background:#89b4fa;border-radius:3px;transition:width .4s}
+.sparkbar .num{font-size:13px;font-weight:700;color:#cdd6f4}
+
+/* pagination */
+.pager{display:flex;gap:8px;align-items:center;margin-top:12px;font-size:13px;color:#6c7086}
+
+/* audit */
+.audit-entry{padding:8px 12px;border-radius:6px;background:#181825;margin-bottom:6px;font-size:13px}
+.audit-entry.leak{border-left:3px solid #f38ba8}
+.audit-entry.info{border-left:3px solid #89b4fa}
+
+/* loading */
+.loading{color:#6c7086;font-size:13px;padding:16px 0}
+
+/* config table */
+.cfg-table{width:100%;font-size:13px;border-collapse:collapse}
+.cfg-table td{padding:6px 12px;border-bottom:1px solid #181825;vertical-align:top}
+.cfg-table td:first-child{color:#6c7086;width:220px;font-family:monospace}
+.cfg-table .redacted{color:#f38ba8;font-style:italic}
+</style>
+</head>
+<body>
+<nav>
+  <span class="brand">⬡ Lazarr</span>
+  <button class="active" onclick="showSection('dashboard',this)">Dashboard</button>
+  <button onclick="showSection('releases',this)">Releases</button>
+  <button onclick="showSection('materialized',this)">Materialized</button>
+  <button onclick="showSection('audit',this)">Audit</button>
+  <button onclick="showSection('repair',this)">Repair</button>
+  <button onclick="showSection('config',this)">Config</button>
+</nav>
+<main>
+
+<!-- DASHBOARD -->
+<div id="section-dashboard" class="section active">
+  <div class="grid2">
+    <div class="card" id="status-card"><div class="loading">Loading…</div></div>
+    <div class="card" id="account-card"><div class="loading">Loading…</div></div>
+    <div class="card" id="metrics-card"><div class="loading">Loading…</div></div>
+    <div class="card" id="slots-card"><div class="loading">Loading…</div></div>
+  </div>
+</div>
+
+<!-- RELEASES -->
+<div id="section-releases" class="section">
+  <div class="card">
+    <h2>All Releases</h2>
+    <div class="filter-row">
+      <input id="rel-q" type="text" placeholder="Search name / hash…" oninput="debounce(loadReleases,300)">
+      <select id="rel-state" onchange="loadReleases()">
+        <option value="">All states</option>
+        <option value="virtual">Virtual</option>
+        <option value="materialized">Materialized</option>
+        <option value="error">Error</option>
+      </select>
+      <select id="rel-cat" onchange="loadReleases()">
+        <option value="">All categories</option>
+      </select>
+      <button class="btn" onclick="loadReleases()">Refresh</button>
+    </div>
+    <div class="table-wrap">
+      <table id="rel-table">
+        <thead><tr>
+          <th>Hash</th><th>Name</th><th>Category</th><th>State</th>
+          <th>Size</th><th>Last Access</th><th>Action</th>
+        </tr></thead>
+        <tbody id="rel-body"><tr><td colspan="7" class="loading">Loading…</td></tr></tbody>
+      </table>
+    </div>
+    <div class="pager">
+      <button class="btn" id="rel-prev" onclick="relPage(-1)" disabled>← Prev</button>
+      <span id="rel-page-info">—</span>
+      <button class="btn" id="rel-next" onclick="relPage(1)" disabled>Next →</button>
+    </div>
+  </div>
+</div>
+
+<!-- MATERIALIZED NOW -->
+<div id="section-materialized" class="section">
+  <div class="card">
+    <h2>Currently Materialized</h2>
+    <div class="filter-row">
+      <button class="btn primary" onclick="loadMat()">Refresh</button>
+      <button class="btn danger" onclick="releaseAllIdle()" id="btn-release-idle">Release All Idle</button>
+      <span id="mat-result" style="font-size:12px;color:#a6e3a1;margin-left:8px"></span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Hash</th><th>TorBox ID</th><th>Active Readers</th><th>Last Used</th><th>Action</th></tr></thead>
+        <tbody id="mat-body"><tr><td colspan="5" class="loading">Loading…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- AUDIT -->
+<div id="section-audit" class="section">
+  <div class="card">
+    <h2>ToS Audit</h2>
+    <div class="filter-row">
+      <button class="btn primary" onclick="runAudit()" id="btn-audit">Run Audit Now</button>
+      <span id="audit-result" style="font-size:12px;margin-left:8px"></span>
+    </div>
+    <p style="font-size:12px;color:#6c7086;margin-bottom:12px">
+      The audit diffs TorBox <code style="color:#cdd6f4">mylist</code> (queried with
+      <code style="color:#cdd6f4">bypass_cache=true</code>) against the materialized set.
+      A non-zero <strong style="color:#f38ba8">lazarr_tos_audit_leaks</strong> metric means
+      the account holds something Lazarr believes it released — a ToS-compliance regression.
+    </p>
+    <div id="audit-status">
+      <div class="loading">Run an audit or wait for the next scheduled one (every 5 minutes).</div>
+    </div>
+  </div>
+</div>
+
+<!-- REPAIR -->
+<div id="section-repair" class="section">
+  <div class="card">
+    <h2>Content Health / Repair</h2>
+    <p style="font-size:12px;color:#6c7086;margin-bottom:12px">
+      Lazarr checks every catalogued hash against TorBox's <code style="color:#cdd6f4">checkcached</code> endpoint daily
+      (no adds, no charges). Items marked <strong style="color:#f38ba8">evicted</strong> are no longer available on TorBox's CDN —
+      playback would fail with a "purged" error. Use <em>Forget</em> to remove the symlink so your arr's health check
+      flags it missing and triggers a re-search.
+    </p>
+    <div class="filter-row">
+      <button class="btn primary" onclick="runRepairScan()" id="btn-repair-scan">Scan Now</button>
+      <span id="repair-scan-result" style="font-size:12px;margin-left:8px"></span>
+      <span style="flex:1"></span>
+      <button class="btn" onclick="loadRepair()">Refresh</button>
+    </div>
+    <div class="table-wrap">
+      <table id="repair-table">
+        <thead><tr>
+          <th>Hash</th><th>Name</th><th>Category</th><th>State</th>
+          <th>Grabbed</th><th>Last Checked</th><th>Action</th>
+        </tr></thead>
+        <tbody id="repair-body"><tr><td colspan="7" class="loading">Loading…</td></tr></tbody>
+      </table>
+    </div>
+    <div id="repair-empty" style="display:none;color:#a6e3a1;padding:16px 0;font-size:13px">
+      ✓ All catalogued content is available on TorBox CDN.
+    </div>
+  </div>
+</div>
+
+<!-- CONFIG -->
+<div id="section-config" class="section">
+  <div class="card">
+    <h2>Effective Config <span style="font-size:11px;color:#f38ba8;font-weight:400">(api_key + passwords redacted)</span></h2>
+    <table class="cfg-table" id="cfg-table"><tr><td colspan="2" class="loading">Loading…</td></tr></table>
+  </div>
+</div>
+
+</main>
+<script>
+// ─── state ──────────────────────────────────────────────────────────────────
+let relOffset = 0;
+const relLimit = 50;
+let relTotal = 0;
+let refreshTimer = null;
+let debounceTimer = null;
+
+// ─── navigation ─────────────────────────────────────────────────────────────
+function showSection(name, btn) {
+  document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+  document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
+  document.getElementById('section-' + name).classList.add('active');
+  btn.classList.add('active');
+  if (refreshTimer) clearInterval(refreshTimer);
+  if (name === 'dashboard') {
+    refreshDashboard();
+    refreshTimer = setInterval(refreshDashboard, 10000);
+  } else if (name === 'releases') {
+    relOffset = 0;
+    loadReleases();
+  } else if (name === 'materialized') {
+    loadMat();
+    refreshTimer = setInterval(loadMat, 10000);
+  } else if (name === 'audit') {
+    loadAuditStatus();
+  } else if (name === 'repair') {
+    loadRepair();
+  } else if (name === 'config') {
+    loadConfig();
+  }
+}
+
+// ─── dashboard ──────────────────────────────────────────────────────────────
+async function refreshDashboard() {
+  const [status, metrics, repair] = await Promise.all([
+    fetchJSON('/api/status'),
+    fetchJSON('/api/metrics-summary'),
+    fetchJSON('/api/repair'),
+  ]);
+  renderStatusCard(status, repair);
+  renderAccountCard(status);
+  renderMetricsCard(metrics);
+  renderSlotsCard(status, metrics);
+}
+
+function renderStatusCard(s, repair) {
+  if (!s) return;
+  const mountBadge = s.mounted
+    ? '<span class="badge green">● Mounted</span>'
+    : '<span class="badge red">● Unmounted</span>';
+  const auditTime = s.last_audit_unix > 0
+    ? new Date(s.last_audit_unix * 1000).toLocaleString()
+    : 'Never';
+  const evicted = repair ? (repair.count || 0) : 0;
+  const repairBadge = evicted > 0
+    ? `<div><span class="badge red">⚠ ${evicted} evicted</span> <a href="#" onclick="showSection('repair',document.querySelectorAll('nav button')[4]);return false" style="font-size:11px;color:#89b4fa">→ Repair tab</a></div>`
+    : '<div><span class="badge green">✓ Content healthy</span></div>';
+  document.getElementById('status-card').innerHTML = `
+    <h2>System Health</h2>
+    <div style="display:flex;flex-direction:column;gap:8px">
+      <div>${mountBadge}</div>
+      <div><span class="lbl" style="color:#6c7086">Version</span> <span>${esc(s.version||'—')}</span></div>
+      <div><span class="lbl" style="color:#6c7086">Uptime</span> <span>${formatDuration(s.uptime_seconds)}</span></div>
+      <div><span class="lbl" style="color:#6c7086">Last Audit</span> <span>${auditTime}</span></div>
+      ${repairBadge}
+    </div>`;
+}
+
+function renderAccountCard(s) {
+  const a = s && s.account;
+  if (!a) {
+    document.getElementById('account-card').innerHTML = `<h2>TorBox Account</h2><div class="loading">Unavailable</div>`;
+    return;
+  }
+  const planNames = {1:'Essential',2:'Pro',3:'Standard'};
+  const plan = planNames[a.plan] || ('Plan ' + a.plan);
+  const cd = a.cooldown_until && a.cooldown_until !== 'None'
+    ? `<span class="badge yellow">Cooldown until ${esc(a.cooldown_until)}</span>`
+    : '<span class="badge green">No cooldown</span>';
+  document.getElementById('account-card').innerHTML = `
+    <h2>TorBox Account</h2>
+    <div class="stats-row">
+      <div class="stat"><span class="val">${a.active_slots}</span><span class="lbl">Active Slots</span></div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:6px">
+      <div><span class="lbl" style="color:#6c7086">Plan</span> <span class="badge blue">${esc(plan)}</span></div>
+      <div>${cd}</div>
+      <div><span class="lbl" style="color:#6c7086">Long-term store</span> <span>${a.long_term_store?'Yes':'No'}</span></div>
+    </div>`;
+}
+
+function renderSlotsCard(s, m) {
+  if (!s) return;
+  const used = s.slots_in_use || 0;
+  const total = s.slots_total || 1;
+  const pct = Math.round(used / total * 100);
+  const matCount = m ? m.materialized_count : 0;
+  const leaks = m ? m.tos_audit_leaks : 0;
+  const leakBadge = leaks > 0
+    ? `<span class="badge red">⚠ ${leaks} leak${leaks!==1?'s':''}</span>`
+    : '<span class="badge green">✓ No leaks</span>';
+  document.getElementById('slots-card').innerHTML = `
+    <h2>Slot Usage</h2>
+    <div class="stats-row">
+      <div class="stat"><span class="val">${used}/${total}</span><span class="lbl">Slots in use</span></div>
+      <div class="stat"><span class="val">${matCount}</span><span class="lbl">Materialized</span></div>
+    </div>
+    <div style="height:8px;background:#313244;border-radius:4px;overflow:hidden;margin:8px 0">
+      <div style="height:100%;width:${pct}%;background:${pct>80?'#f38ba8':'#89b4fa'};border-radius:4px;transition:width .4s"></div>
+    </div>
+    <div>${leakBadge}</div>`;
+}
+
+function renderMetricsCard(m) {
+  if (!m) return;
+  const items = [
+    {lbl:'Grabs', val:m.grabs_total},
+    {lbl:'Materializes', val:m.materializes_total},
+    {lbl:'Releases', val:m.releases_total},
+    {lbl:'Link Refreshes', val:m.link_refresh_total},
+    {lbl:'Rate Limited', val:m.create_ratelimited_total},
+    {lbl:'Probe Hits', val:m.probe_hits_total},
+    {lbl:'Probe Misses', val:m.probe_misses_total},
+  ];
+  const maxVal = Math.max(...items.map(i => i.val||0), 1);
+  const bars = items.map(i => {
+    const pct = Math.round((i.val||0)/maxVal*100);
+    return `<div class="sparkbar">
+      <div class="num">${fmtNum(i.val||0)}</div>
+      <div class="bar-wrap"><div class="bar-fill" style="width:${pct}%"></div></div>
+      <div class="lbl">${esc(i.lbl)}</div>
+    </div>`;
+  }).join('');
+  document.getElementById('metrics-card').innerHTML = `<h2>Counters</h2><div class="sparkbar-row">${bars}</div>`;
+}
+
+// ─── releases ───────────────────────────────────────────────────────────────
+async function loadReleases() {
+  const q = document.getElementById('rel-q').value;
+  const state = document.getElementById('rel-state').value;
+  const cat = document.getElementById('rel-cat').value;
+  const url = `/api/releases?q=${encodeURIComponent(q)}&state=${encodeURIComponent(state)}&category=${encodeURIComponent(cat)}&limit=${relLimit}&offset=${relOffset}`;
+  const data = await fetchJSON(url);
+  if (!data) return;
+  relTotal = data.total || 0;
+  const body = document.getElementById('rel-body');
+  if (!data.releases || data.releases.length === 0) {
+    body.innerHTML = '<tr><td colspan="7" style="color:#6c7086;padding:16px">No releases found.</td></tr>';
+  } else {
+    body.innerHTML = data.releases.map(r => {
+      const stBadge = stateBadge(r.state);
+      const size = fmtBytes(r.total_size);
+      const la = r.last_access > 0 ? relTime(r.last_access) : '—';
+      const action = r.state === 'materialized'
+        ? `<button class="btn danger" onclick="forceRelease('${esc(r.hash)}',this)">Release</button>`
+        : '—';
+      return `<tr>
+        <td><span class="hash">${esc(r.hash.slice(0,12))}…</span></td>
+        <td class="name-cell" title="${esc(r.name)}">${esc(r.name)}</td>
+        <td>${esc(r.category)}</td>
+        <td>${stBadge}</td>
+        <td>${size}</td>
+        <td>${la}</td>
+        <td>${action}</td>
+      </tr>`;
+    }).join('');
+    // populate category dropdown from results (first load)
+    if (relOffset === 0) populateCatDropdown(data.releases);
+  }
+  const start = relOffset + 1;
+  const end = Math.min(relOffset + (data.releases ? data.releases.length : 0), relTotal);
+  document.getElementById('rel-page-info').textContent = `${start}–${end} of ${relTotal}`;
+  document.getElementById('rel-prev').disabled = relOffset === 0;
+  document.getElementById('rel-next').disabled = end >= relTotal;
+}
+
+function relPage(dir) {
+  relOffset = Math.max(0, relOffset + dir * relLimit);
+  loadReleases();
+}
+
+function populateCatDropdown(rels) {
+  const sel = document.getElementById('rel-cat');
+  const existing = new Set(Array.from(sel.options).map(o => o.value));
+  rels.forEach(r => {
+    if (r.category && !existing.has(r.category)) {
+      const opt = document.createElement('option');
+      opt.value = r.category;
+      opt.textContent = r.category;
+      sel.appendChild(opt);
+      existing.add(r.category);
+    }
+  });
+}
+
+async function forceRelease(hash, btn) {
+  btn.disabled = true;
+  btn.textContent = '…';
+  const ok = await postJSON(`/api/releases/${encodeURIComponent(hash)}/release`);
+  if (ok) {
+    btn.textContent = 'Released';
+    btn.className = 'btn';
+    setTimeout(loadReleases, 500);
+  } else {
+    btn.disabled = false;
+    btn.textContent = 'Error';
+  }
+}
+
+// ─── materialized ───────────────────────────────────────────────────────────
+async function loadMat() {
+  const items = await fetchJSON('/api/materialized');
+  const body = document.getElementById('mat-body');
+  if (!items || items.length === 0) {
+    body.innerHTML = '<tr><td colspan="5" style="color:#6c7086;padding:16px">Nothing materialized right now.</td></tr>';
+    return;
+  }
+  body.innerHTML = items.map(it => {
+    const lu = it.last_used_ns > 0 ? relTimeNs(it.last_used_ns) : '—';
+    const refBadge = it.refs > 0
+      ? `<span class="badge blue">${it.refs} reader${it.refs!==1?'s':''}</span>`
+      : '<span class="badge gray">idle</span>';
+    const action = it.refs === 0
+      ? `<button class="btn danger" onclick="forceReleaseMat('${esc(it.hash)}',this)">Release</button>`
+      : '<button class="btn" disabled title="Active readers">Pinned</button>';
+    return `<tr>
+      <td><span class="hash">${esc(it.hash.slice(0,12))}…</span></td>
+      <td>${it.torbox_id}</td>
+      <td>${refBadge}</td>
+      <td>${lu}</td>
+      <td>${action}</td>
+    </tr>`;
+  }).join('');
+}
+
+async function forceReleaseMat(hash, btn) {
+  btn.disabled = true;
+  const ok = await postJSON(`/api/releases/${encodeURIComponent(hash)}/release`);
+  document.getElementById('mat-result').textContent = ok ? 'Released.' : 'Error.';
+  setTimeout(loadMat, 500);
+}
+
+async function releaseAllIdle() {
+  const btn = document.getElementById('btn-release-idle');
+  const items = await fetchJSON('/api/materialized');
+  if (!items) return;
+  const idle = items.filter(i => i.refs === 0);
+  if (idle.length === 0) {
+    document.getElementById('mat-result').textContent = 'No idle items.';
+    return;
+  }
+  btn.disabled = true;
+  let released = 0;
+  for (const it of idle) {
+    const ok = await postJSON(`/api/releases/${encodeURIComponent(it.hash)}/release`);
+    if (ok) released++;
+  }
+  document.getElementById('mat-result').textContent = `Released ${released}/${idle.length}.`;
+  btn.disabled = false;
+  setTimeout(loadMat, 500);
+}
+
+// ─── audit ───────────────────────────────────────────────────────────────────
+async function runAudit() {
+  const btn = document.getElementById('btn-audit');
+  const res = document.getElementById('audit-result');
+  btn.disabled = true;
+  btn.textContent = 'Running…';
+  res.textContent = '';
+  res.style.color = '';
+  const ok = await postJSON('/api/audit/run');
+  btn.disabled = false;
+  btn.textContent = 'Run Audit Now';
+  if (ok) {
+    res.style.color = '#a6e3a1';
+    res.textContent = 'Audit complete — check metrics for leaks.';
+    loadAuditStatus();
+  } else {
+    res.style.color = '#f38ba8';
+    res.textContent = 'Audit failed — see daemon logs.';
+  }
+}
+
+async function loadAuditStatus() {
+  const [status, metrics] = await Promise.all([
+    fetchJSON('/api/status'),
+    fetchJSON('/api/metrics-summary'),
+  ]);
+  if (!status || !metrics) return;
+  const leaks = metrics.tos_audit_leaks || 0;
+  const lastAudit = status.last_audit_unix > 0
+    ? new Date(status.last_audit_unix * 1000).toLocaleString()
+    : 'Never';
+  const leakEl = leaks > 0
+    ? `<div class="audit-entry leak">⚠ ${leaks} TorBox item(s) held that Lazarr believes are released. Check daemon logs for torbox_id details.</div>`
+    : '<div class="audit-entry info">✓ No leaks detected in the last audit.</div>';
+  document.getElementById('audit-status').innerHTML = `
+    <div style="margin-bottom:10px;font-size:13px;color:#6c7086">Last run: <strong style="color:#cdd6f4">${lastAudit}</strong></div>
+    ${leakEl}`;
+}
+
+// ─── repair ──────────────────────────────────────────────────────────────────
+async function loadRepair() {
+  const data = await fetchJSON('/api/repair');
+  const body = document.getElementById('repair-body');
+  const empty = document.getElementById('repair-empty');
+  const table = document.getElementById('repair-table');
+  if (!data) { body.innerHTML = '<tr><td colspan="7" style="color:#f38ba8">Failed to load.</td></tr>'; return; }
+  const items = data.evicted || [];
+  if (items.length === 0) {
+    body.innerHTML = '';
+    table.style.display = 'none';
+    empty.style.display = 'block';
+    return;
+  }
+  table.style.display = '';
+  empty.style.display = 'none';
+  body.innerHTML = items.map(r => {
+    const stBadge = r.state === 'materialized'
+      ? '<span class="badge blue">materialized</span>'
+      : '<span class="badge gray">' + esc(r.state||'virtual') + '</span>';
+    const grabbed = r.added_on > 0 ? relTime(r.added_on) : '—';
+    const checked = r.last_cache_check > 0 ? relTime(r.last_cache_check) : 'Never';
+    return `<tr>
+      <td><span class="hash" title="${esc(r.hash)}">${esc(r.hash.slice(0,12))}…</span></td>
+      <td class="name-cell" title="${esc(r.name)}">${esc(r.name)}</td>
+      <td>${esc(r.category)}</td>
+      <td>${stBadge}</td>
+      <td>${grabbed}</td>
+      <td>${checked}</td>
+      <td><button class="btn danger" onclick="forgetRelease('${esc(r.hash)}',this)">Forget</button></td>
+    </tr>`;
+  }).join('');
+}
+
+async function runRepairScan() {
+  const btn = document.getElementById('btn-repair-scan');
+  const res = document.getElementById('repair-scan-result');
+  btn.disabled = true;
+  btn.textContent = 'Scanning…';
+  res.textContent = '';
+  res.style.color = '';
+  const data = await fetchJSONPost('/api/repair/scan');
+  btn.disabled = false;
+  btn.textContent = 'Scan Now';
+  if (data) {
+    const n = data.count || 0;
+    res.style.color = n > 0 ? '#f38ba8' : '#a6e3a1';
+    res.textContent = n > 0 ? `${n} evicted item(s) found.` : '✓ All content available.';
+    loadRepair();
+  } else {
+    res.style.color = '#f38ba8';
+    res.textContent = 'Scan failed — see daemon logs.';
+  }
+}
+
+async function forgetRelease(hash, btn) {
+  if (!confirm(`Forget ${hash.slice(0,12)}…? This deletes the symlink so your arr will re-search.`)) return;
+  btn.disabled = true;
+  btn.textContent = '…';
+  const ok = await postJSON(`/api/repair/${encodeURIComponent(hash)}/forget`);
+  if (ok) {
+    btn.closest('tr').style.opacity = '0.4';
+    btn.textContent = 'Forgotten';
+    setTimeout(loadRepair, 800);
+  } else {
+    btn.disabled = false;
+    btn.textContent = 'Error';
+  }
+}
+
+async function fetchJSONPost(url) {
+  try {
+    const r = await fetch(url, {method:'POST'});
+    if (!r.ok) return null;
+    return await r.json();
+  } catch { return null; }
+}
+
+// ─── config ──────────────────────────────────────────────────────────────────
+async function loadConfig() {
+  const cfg = await fetchJSON('/api/config');
+  if (!cfg) return;
+  const rows = Object.entries(cfg).map(([k, v]) => {
+    const display = v === null || v === undefined || v === ''
+      ? '<span style="color:#45475a">—</span>'
+      : Array.isArray(v)
+        ? esc(v.join(', '))
+        : typeof v === 'boolean'
+          ? (v ? '<span class="badge green">true</span>' : '<span class="badge gray">false</span>')
+          : esc(String(v));
+    return `<tr><td>${esc(k)}</td><td>${display}</td></tr>`;
+  }).join('');
+  document.getElementById('cfg-table').innerHTML = rows;
+}
+
+// ─── helpers ─────────────────────────────────────────────────────────────────
+async function fetchJSON(url) {
+  try {
+    const r = await fetch(url);
+    if (!r.ok) return null;
+    return await r.json();
+  } catch { return null; }
+}
+
+async function postJSON(url) {
+  try {
+    const r = await fetch(url, {method:'POST'});
+    return r.ok;
+  } catch { return false; }
+}
+
+function esc(s) {
+  if (s == null) return '';
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function stateBadge(state) {
+  if (state === 'materialized') return '<span class="badge blue">materialized</span>';
+  if (state === 'error') return '<span class="badge red">error</span>';
+  return '<span class="badge gray">virtual</span>';
+}
+
+function fmtBytes(n) {
+  if (!n) return '—';
+  const units = ['B','KB','MB','GB','TB'];
+  let i = 0;
+  while (n >= 1024 && i < units.length-1) { n /= 1024; i++; }
+  return n.toFixed(1) + ' ' + units[i];
+}
+
+function fmtNum(n) {
+  if (n == null) return '0';
+  return Number(n).toLocaleString();
+}
+
+function formatDuration(secs) {
+  if (!secs) return '0s';
+  const d = Math.floor(secs/86400), h = Math.floor((secs%86400)/3600);
+  const m = Math.floor((secs%3600)/60), s = secs%60;
+  if (d > 0) return `${d}d ${h}h`;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
+function relTime(unixSec) {
+  const diff = Math.floor(Date.now()/1000 - unixSec);
+  if (diff < 60) return diff + 's ago';
+  if (diff < 3600) return Math.floor(diff/60) + 'm ago';
+  if (diff < 86400) return Math.floor(diff/3600) + 'h ago';
+  return Math.floor(diff/86400) + 'd ago';
+}
+
+function relTimeNs(ns) {
+  return relTime(Math.floor(ns/1e9));
+}
+
+function debounce(fn, delay) {
+  if (debounceTimer) clearTimeout(debounceTimer);
+  debounceTimer = setTimeout(fn, delay);
+}
+
+// ─── init ────────────────────────────────────────────────────────────────────
+refreshDashboard();
+refreshTimer = setInterval(refreshDashboard, 10000);
+</script>
+</body>
+</html>

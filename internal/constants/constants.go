@@ -27,9 +27,18 @@ const (
 
 // Lazarr policy defaults (overridable via config.yaml).
 var (
-	DefaultIdleTTL      = 15 * time.Minute
-	DefaultMaxHold      = 24 * time.Hour
-	DefaultReaperEvery  = 30 * time.Second
-	DefaultActiveSlots  = EssentialActiveSlots
-	LinkRefreshStatuses = []int{400, 403, 410} // re-request presigned URL then retry
+	// DefaultIdleTTL: release a materialized item after 7 days of no playback.
+	// This matches the "watch-then-forget" model — items stay hot for a week so
+	// re-watching doesn't cost a TorBox re-add, while still well under TorBox's
+	// 30-day natural expiry. LRU eviction handles slot pressure when all 3 slots
+	// are occupied and a new item needs materializing.
+	DefaultIdleTTL     = 7 * 24 * time.Hour  // 7 days
+	DefaultMaxHold     = 30 * 24 * time.Hour // 30 days — matches TorBox's own purge window
+	DefaultReaperEvery = 30 * time.Second
+	DefaultActiveSlots = EssentialActiveSlots
+	// DefaultCloseDrain is how long Close waits for in-flight readers to release their refs
+	// before force-releasing pinned entries on shutdown (B3 — never leak a TorBox item).
+	DefaultCloseDrain        = 5 * time.Second
+	LinkRefreshStatuses      = []int{400, 403, 410} // re-request presigned URL then retry
+	DefaultRepairScanEvery   = 24 * time.Hour        // how often the repair scan runs
 )

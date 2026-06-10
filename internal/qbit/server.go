@@ -593,6 +593,15 @@ func (s *server) handleTorrentsDelete(w http.ResponseWriter, r *http.Request) {
 		if err := s.deps.Symlink.Remove(h); err != nil {
 			slog.Warn("qbit: Symlink.Remove", "hash", h, "err", err)
 		}
+		// S2: release any in-flight (or store-only) materialization BEFORE deleting the row.
+		// Order matters — Release consults the store for store-only leftovers (B2), so
+		// deleting the row first would orphan the TorBox item. A release error must not fail
+		// the delete (the arr expects 200); log and continue.
+		if s.deps.Engine != nil {
+			if err := s.deps.Engine.Release(h); err != nil {
+				slog.Warn("qbit: engine release on delete", "hash", h, "err", err)
+			}
+		}
 		if err := s.deps.Store.DeleteRelease(h); err != nil {
 			slog.Warn("qbit: DeleteRelease", "hash", h, "err", err)
 		}

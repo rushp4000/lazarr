@@ -86,8 +86,15 @@ Set `metrics.listen: ":9090"` to expose:
 - `GET /health` — JSON `{mounted, slots_in_use, slots_total, last_audit_unix, version}`; usable
   as a Docker `healthcheck`.
 
-Recommended alert: **`lazarr_tos_audit_leaks > 0`** (the account is holding something Lazarr
-believes it released — a ToS-compliance regression).
+Recommended alerts:
+- **`lazarr_tos_audit_leaks > 0`** — the account is holding something Lazarr believes it
+  released (a ToS-compliance regression).
+- **`increase(lazarr_reaper_skipped_total[15m]) > 0`** (sustained) — the idle/max-hold
+  reapers are being skipped because the FUSE mount reports unhealthy, so **reaping is paused**
+  and materialized items are NOT being released. A brief blip is normal (a transient mount
+  hiccup); a *rising* counter over many minutes means the mount is wedged and items will be
+  held past `max_hold` (toward TorBox's 30-day purge). Investigate the mount alongside
+  `/health`'s `mounted:false`.
 
 ## 7. Security / trust model
 No authentication on the qbit port or the metrics port (matches decypharr/rdt-client — it's a

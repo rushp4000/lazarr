@@ -90,7 +90,11 @@ func (f *fakeStore) TouchAccess(hash string, ts int64) error {
 
 func (f *fakeStore) IdleCandidates(before int64) ([]*catalog.Release, error)  { return nil, nil }
 func (f *fakeStore) OverMaxHold(before int64) ([]*catalog.Release, error)     { return nil, nil }
+func (f *fakeStore) ListReleases(_ catalog.ReleaseFilter) ([]*catalog.Release, int, error) {
+	return nil, 0, nil
+}
 func (f *fakeStore) MaterializedIDs() ([]int64, error)                        { return nil, nil }
+func (f *fakeStore) MaterializedReleases() ([]*catalog.Release, error)        { return nil, nil }
 func (f *fakeStore) GetLink(hash string, fileID int) (*catalog.DLLink, error) { return nil, nil }
 func (f *fakeStore) SetLink(l *catalog.DLLink) error                          { return nil }
 
@@ -101,7 +105,10 @@ func (f *fakeStore) DeleteRelease(hash string) error {
 	return nil
 }
 
-func (f *fakeStore) Close() error { return nil }
+func (f *fakeStore) Close() error                                              { return nil }
+func (f *fakeStore) ListAllHashes() ([]string, error)                         { return nil, nil }
+func (f *fakeStore) SetCacheStatus(_ string, _ catalog.CacheStatus, _ int64) error { return nil }
+func (f *fakeStore) ListEvicted() ([]*catalog.Release, error)                  { return nil, nil }
 
 // fakeTorBox implements torbox.Client with canned responses.
 type fakeTorBox struct {
@@ -581,6 +588,37 @@ func TestDeleteMultipleHashes(t *testing.T) {
 	assert.Contains(t, e.store.deleted, h2)
 	assert.Contains(t, e.symlink.removed, h1)
 	assert.Contains(t, e.symlink.removed, h2)
+}
+
+// fakeReleaser records Release calls for the S2 delete-release test.
+type fakeReleaser struct{ released []string }
+
+func (f *fakeReleaser) Release(hash string) error {
+	f.released = append(f.released, hash)
+	return nil
+}
+
+// TestDeleteReleasesEngine proves torrents/delete calls the engine's Release exactly once
+// per hash (S2) so a delete during playback frees the TorBox item + slot instead of
+// leaking it. Nil-safe: the other delete tests pass no engine and must still pass.
+func TestDeleteReleasesEngine(t *testing.T) {
+	cfg := config.Default()
+	cfg.Categories = []string{"radarr_hin"}
+	rel := &fakeReleaser{}
+	h := qbit.New(qbit.Deps{
+		Config: cfg, Store: newFakeStore(), TorBox: &fakeTorBox{},
+		Symlink: &fakeSymlink{}, Engine: rel,
+	})
+
+	body, ct := formBody("hashes", cachedHash)
+	req := httptest.NewRequest("POST", "/api/v2/torrents/delete", body)
+	req.Header.Set("Content-Type", ct)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	require.Len(t, rel.released, 1, "engine.Release must be called exactly once")
+	assert.Equal(t, cachedHash, rel.released[0])
 }
 
 // TestAddSetsContentPathUnderDownloadDir ensures content_path starts with DownloadDir/category.

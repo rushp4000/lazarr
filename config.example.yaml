@@ -19,8 +19,15 @@ categories:                # must match arr names (Radarr movieCategory / Sonarr
 
 policy:
   allow_uncached: false    # cached-only default; toggle on to let TorBox really download uncached
-  idle_ttl: "15m"          # release a materialized item after this much no-access
-  max_hold: "24h"          # hard ceiling regardless of access (well under TorBox's 30d)
+
+  # Materialization lifecycle — "watch-then-forget" model:
+  # Lazarr keeps a played item on TorBox for idle_ttl after the last byte is read.
+  # Re-watching within that window costs no extra add. After idle_ttl the reaper releases
+  # the slot; the next play re-adds transparently. LRU eviction kicks in even sooner
+  # when all active_slots are occupied and a new play arrives.
+  idle_ttl: "168h"         # 7 days — keeps recently-watched content hot without hoarding
+  max_hold: "720h"         # 30 days absolute ceiling, matching TorBox's natural purge window
+
   # active_slots: concurrent materializations. SET TO YOUR TORBOX PLAN'S SLOT COUNT.
   #   Essential = 3 (default). Pro/Standard allow more -> raise to match.
   #   Never set higher than your plan (extra adds get rejected). 0 = auto-detect.
@@ -39,4 +46,19 @@ metrics:
   # OPT-IN observability on a SEPARATE port (kept off the arr-facing qbit port). Empty =
   # disabled. When set, serves Prometheus /metrics and JSON /health. Unauthenticated like
   # the qbit port — bind to the trusted LAN only.
-  listen: ""               # e.g. ":9090"
+  # Default :9090 so the docker-compose.example.yml healthcheck works out of the box (S8).
+  # Clearing it ("") disables the admin port AND breaks that healthcheck — if you disable
+  # metrics, also remove the `healthcheck:` block from your compose file (or the container
+  # will be marked unhealthy forever).
+  listen: ":9090"
+
+webui:
+  # OPT-IN human dashboard on a SEPARATE port. Empty = disabled. Serves the Lazarr
+  # dashboard: releases table, live materialized set, ToS audit, repair scanner (content
+  # health), and config view.
+  # Like the qbit and metrics ports it is unauthenticated by default — bind to the trusted
+  # LAN. Set username + password to enable HTTP Basic Auth (recommended; the UI has
+  # mutating actions: force-release, run-audit, repair-scan, forget-release).
+  listen: ":8081"          # set empty to disable
+  username: ""             # leave empty to disable auth (trusted-LAN only)
+  password: ""             # must be set together with username

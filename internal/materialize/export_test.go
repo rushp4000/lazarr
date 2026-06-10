@@ -3,6 +3,8 @@ package materialize
 import (
 	"net/url"
 	"time"
+
+	"github.com/rushp4000/lazarr/internal/metrics"
 )
 
 // This file exposes a minimal, test-only surface so the white-box tests can:
@@ -20,6 +22,13 @@ func (m *materializer) AllowTestHost(host string) { m.prox.allowHost(host) }
 
 // SetNow overrides the engine clock for deterministic tests.
 func (m *materializer) SetNow(f func() time.Time) { m.now = f }
+
+// SetDrainTimeout overrides the Close ref-drain window (B3) so shutdown tests don't wait
+// the full production grace period.
+func (m *materializer) SetDrainTimeout(d time.Duration) { m.drainTimeout = d }
+
+// Reconcile runs the boot-time reconciliation sweep synchronously for tests (B2).
+func (m *materializer) Reconcile() { m.reconcile(testCtx()) }
 
 // SlotCap exposes the resolved active-slot budget.
 func (m *materializer) SlotCap() int { return m.slotCap() }
@@ -66,9 +75,11 @@ func (m *materializer) reapOnce() {
 }
 
 // runReapOnceGuarded runs one reaper cycle through the broken-mount guard exactly as
-// runReapers does per tick: skip both sweeps when the mount is unhealthy, else reap.
+// runReapers does per tick: skip both sweeps (and count the skip) when the mount is
+// unhealthy, else reap.
 func (m *materializer) runReapOnceGuarded() {
 	if !m.mountIsHealthy() {
+		metrics.IncReaperSkipped()
 		return
 	}
 	m.reapOnce()

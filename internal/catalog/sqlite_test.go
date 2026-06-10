@@ -1,6 +1,7 @@
 package catalog
 
 import (
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -61,12 +62,64 @@ func TestMigrationsIdempotent(t *testing.T) {
 	require.NoError(t, s2.Close())
 }
 
+// TestMigrateAddsMaterializedAt simulates the canary's pre-existing DB: a release table
+// created BEFORE the materialized_at column (B1). OpenSQLite must add the column
+// idempotently and backfill pre-existing materialized rows to NOW so they are not instantly
+// reap-eligible (materialized_at=0 would read as the epoch).
+func TestMigrateAddsMaterializedAt(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "legacy.db")
+
+	// Build a legacy DB: the old release schema (no materialized_at) with one materialized
+	// row and one virtual row.
+	raw, err := sql.Open("sqlite", "file:"+path)
+	require.NoError(t, err)
+	_, err = raw.Exec(`
+		CREATE TABLE release (
+		    hash TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', category TEXT NOT NULL DEFAULT '',
+		    magnet TEXT NOT NULL DEFAULT '', total_size INTEGER NOT NULL DEFAULT 0,
+		    state TEXT NOT NULL DEFAULT 'virtual', cached INTEGER NOT NULL DEFAULT 0,
+		    torbox_id INTEGER NOT NULL DEFAULT 0, added_on INTEGER NOT NULL DEFAULT 0,
+		    last_access INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL DEFAULT 0
+		);
+		INSERT INTO release (hash, state, torbox_id, added_on) VALUES ('mat', 'materialized', 5, 100);
+		INSERT INTO release (hash, state) VALUES ('virt', 'virtual');`)
+	require.NoError(t, err)
+	require.NoError(t, raw.Close())
+
+	// Open via the production path → migration adds the column + backfills.
+	s, err := OpenSQLite(path)
+	require.NoError(t, err, "opening a legacy DB must migrate cleanly")
+	t.Cleanup(func() { s.Close() })
+
+	mat, _, err := s.GetRelease("mat")
+	require.NoError(t, err)
+	assert.Greater(t, mat.MaterializedAt, int64(0), "pre-existing materialized row backfilled to NOW")
+
+	virt, _, err := s.GetRelease("virt")
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), virt.MaterializedAt, "virtual row stays at 0")
+
+	// The just-backfilled row must NOT be over-max-hold against a recent cutoff (it would be
+	// if materialized_at were left at the epoch) — the whole point of the backfill.
+	over, err := s.OverMaxHold(50) // cutoff well before NOW
+	require.NoError(t, err)
+	assert.Empty(t, over, "freshly-backfilled row is not instantly reap-eligible")
+
+	// Re-open to prove the ALTER is idempotent on an already-migrated DB.
+	require.NoError(t, s.Close())
+	s2, err := OpenSQLite(path)
+	require.NoError(t, err, "re-open of migrated DB must not fail")
+	require.NoError(t, s2.Close())
+}
+
 // ---- UpsertRelease + GetRelease round-trip ---------------------------------
 
 func TestUpsertGetRoundTrip(t *testing.T) {
 	s := openTestDB(t)
 	hash := "aabbcc001122334455667788990011223344556677"
 	r := sampleRelease(hash)
+	r.MaterializedAt = 1717000000 // persisted verbatim by UpsertRelease (B1 column)
 	files := sampleFiles(hash)
 
 	require.NoError(t, s.UpsertRelease(r, files))
@@ -85,6 +138,7 @@ func TestUpsertGetRoundTrip(t *testing.T) {
 	assert.Equal(t, r.TorBoxID, got.TorBoxID)
 	assert.Equal(t, r.AddedOn, got.AddedOn)
 	assert.Equal(t, r.LastAccess, got.LastAccess)
+	assert.Equal(t, r.MaterializedAt, got.MaterializedAt)
 	assert.Equal(t, r.CreatedAt, got.CreatedAt)
 
 	// File rows
@@ -287,33 +341,48 @@ func TestIdleCandidates(t *testing.T) {
 	assert.Len(t, candidates, 1)
 }
 
-// ---- OverMaxHold -----------------------------------------------------------
+// ---- OverMaxHold (B1: measured from materialized_at, not added_on) ----------
 
 func TestOverMaxHold(t *testing.T) {
 	s := openTestDB(t)
 
+	// materialized_at ascends while added_on DESCENDS — proving the filter keys off
+	// materialized_at (grab order is the inverse and must be ignored). Rows are upserted
+	// directly as materialized with explicit materialized_at (SetState would stamp NOW).
 	releases := []struct {
-		hash    string
-		addedOn int64
+		hash           string
+		addedOn        int64
+		materializedAt int64
 	}{
-		{"hold0000000000000000000000000000000001", 1000},
-		{"hold0000000000000000000000000000000002", 2000},
-		{"hold0000000000000000000000000000000003", 3000},
+		{"hold0000000000000000000000000000000001", 9000, 1000},
+		{"hold0000000000000000000000000000000002", 8000, 2000},
+		{"hold0000000000000000000000000000000003", 7000, 3000},
 	}
 	for _, tc := range releases {
 		r := sampleRelease(tc.hash)
 		r.AddedOn = tc.addedOn
+		r.State = StateMaterialized
+		r.TorBoxID = 200
+		r.MaterializedAt = tc.materializedAt
 		require.NoError(t, s.UpsertRelease(r, nil))
-		require.NoError(t, s.SetState(tc.hash, StateMaterialized, 200))
 	}
 
-	// Virtual release must NOT appear.
+	// Virtual release must NOT appear, even with an ancient materialized_at.
 	virt := "hold_virt00000000000000000000000000001"
 	rv := sampleRelease(virt)
-	rv.AddedOn = 500
+	rv.MaterializedAt = 1
 	require.NoError(t, s.UpsertRelease(rv, nil))
 
-	// before=2500 → hash with added_on 1000 and 2000 are < 2500.
+	// A materialized row with materialized_at=0 must NOT appear (the > 0 guard): without it
+	// the epoch reads as ancient and the release would be reaped mid-grab (B1).
+	guard := "hold_guard0000000000000000000000000001"
+	rg := sampleRelease(guard)
+	rg.State = StateMaterialized
+	rg.TorBoxID = 201
+	rg.MaterializedAt = 0
+	require.NoError(t, s.UpsertRelease(rg, nil))
+
+	// before=2500 → materialized_at 1000 and 2000 are < 2500 (added_on order is opposite).
 	got, err := s.OverMaxHold(2500)
 	require.NoError(t, err)
 	assert.Len(t, got, 2)
@@ -322,6 +391,41 @@ func TestOverMaxHold(t *testing.T) {
 	got, err = s.OverMaxHold(1000)
 	require.NoError(t, err)
 	assert.Empty(t, got)
+
+	// Far-future cutoff still excludes the virtual row and the materialized_at=0 guard row.
+	got, err = s.OverMaxHold(1 << 40)
+	require.NoError(t, err)
+	assert.Len(t, got, 3, "only the three stamped materialized rows are candidates")
+}
+
+// TestMaterializedAtStampedBySetState proves SetState stamps materialized_at on entry to
+// StateMaterialized and zeroes it on exit (B1), so the max-hold window is measured from
+// materialize time and a released row is never an over-max-hold candidate.
+func TestMaterializedAtStampedBySetState(t *testing.T) {
+	s := openTestDB(t)
+	hash := "matat000000000000000000000000000000001"
+	r := sampleRelease(hash)
+	r.AddedOn = 1 // ancient grab
+	require.NoError(t, s.UpsertRelease(r, nil))
+
+	got, _, err := s.GetRelease(hash)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), got.MaterializedAt, "virtual release has no materialized_at")
+
+	require.NoError(t, s.SetState(hash, StateMaterialized, 7))
+	got, _, err = s.GetRelease(hash)
+	require.NoError(t, err)
+	assert.Greater(t, got.MaterializedAt, int64(0), "materialized_at stamped on entry")
+
+	// Leaving materialized zeroes it; OverMaxHold then never returns it.
+	require.NoError(t, s.SetState(hash, StateVirtual, 0))
+	got, _, err = s.GetRelease(hash)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), got.MaterializedAt, "materialized_at zeroed on exit")
+
+	over, err := s.OverMaxHold(1 << 40)
+	require.NoError(t, err)
+	assert.Empty(t, over, "released (virtual) release is never over-max-hold")
 }
 
 // ---- MaterializedIDs -------------------------------------------------------
@@ -484,4 +588,92 @@ func TestErrNotFoundSentinel(t *testing.T) {
 		err := s.DeleteRelease("x")
 		assert.True(t, errors.Is(err, ErrNotFound))
 	})
+}
+
+// ---- ListReleases -----------------------------------------------------------
+
+func TestListReleases_All(t *testing.T) {
+	s := openTestDB(t)
+	hashes := []string{
+		"list0000000000000000000000000000000001",
+		"list0000000000000000000000000000000002",
+		"list0000000000000000000000000000000003",
+	}
+	for i, h := range hashes {
+		r := sampleRelease(h)
+		r.Name = "Movie " + string(rune('A'+i))
+		require.NoError(t, s.UpsertRelease(r, nil))
+	}
+
+	got, total, err := s.ListReleases(ReleaseFilter{})
+	require.NoError(t, err)
+	assert.Equal(t, 3, total)
+	assert.Len(t, got, 3)
+}
+
+func TestListReleases_QueryFilter(t *testing.T) {
+	s := openTestDB(t)
+	r1 := sampleRelease("listq000000000000000000000000000000001")
+	r1.Name = "Big Buck Bunny"
+	r2 := sampleRelease("listq000000000000000000000000000000002")
+	r2.Name = "Elephants Dream"
+	require.NoError(t, s.UpsertRelease(r1, nil))
+	require.NoError(t, s.UpsertRelease(r2, nil))
+
+	got, total, err := s.ListReleases(ReleaseFilter{Q: "buck"})
+	require.NoError(t, err)
+	assert.Equal(t, 1, total)
+	require.Len(t, got, 1)
+	assert.Equal(t, "Big Buck Bunny", got[0].Name)
+}
+
+func TestListReleases_StateFilter(t *testing.T) {
+	s := openTestDB(t)
+	rv := sampleRelease("lists000000000000000000000000000000001")
+	require.NoError(t, s.UpsertRelease(rv, nil)) // virtual (default)
+	rm := sampleRelease("lists000000000000000000000000000000002")
+	require.NoError(t, s.UpsertRelease(rm, nil))
+	require.NoError(t, s.SetState(rm.Hash, StateMaterialized, 999))
+
+	got, total, err := s.ListReleases(ReleaseFilter{State: StateMaterialized})
+	require.NoError(t, err)
+	assert.Equal(t, 1, total)
+	require.Len(t, got, 1)
+	assert.Equal(t, StateMaterialized, got[0].State)
+}
+
+func TestListReleases_CategoryFilter(t *testing.T) {
+	s := openTestDB(t)
+	r1 := sampleRelease("listc000000000000000000000000000000001")
+	r1.Category = "sonarr_hd"
+	r2 := sampleRelease("listc000000000000000000000000000000002")
+	r2.Category = "radarr_hin"
+	require.NoError(t, s.UpsertRelease(r1, nil))
+	require.NoError(t, s.UpsertRelease(r2, nil))
+
+	got, total, err := s.ListReleases(ReleaseFilter{Category: "sonarr_hd"})
+	require.NoError(t, err)
+	assert.Equal(t, 1, total)
+	require.Len(t, got, 1)
+	assert.Equal(t, "sonarr_hd", got[0].Category)
+}
+
+func TestListReleases_Pagination(t *testing.T) {
+	s := openTestDB(t)
+	for i := 0; i < 5; i++ {
+		r := sampleRelease("listp" + string(rune('0'+i)) + "000000000000000000000000000000001")
+		require.NoError(t, s.UpsertRelease(r, nil))
+	}
+
+	// page 1
+	got, total, err := s.ListReleases(ReleaseFilter{Limit: 3, Offset: 0})
+	require.NoError(t, err)
+	assert.Equal(t, 5, total)
+	assert.Len(t, got, 3)
+
+	// page 2
+	got2, total2, err := s.ListReleases(ReleaseFilter{Limit: 3, Offset: 3})
+	require.NoError(t, err)
+	assert.Equal(t, 5, total2)
+	assert.Len(t, got2, 2)
 }

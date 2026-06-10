@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/rushp4000/lazarr/internal/catalog"
 	"github.com/rushp4000/lazarr/internal/config"
@@ -57,9 +58,26 @@ func New(paths config.Paths, own config.Ownership) Manager {
 		fuseMount:   filepath.Clean(paths.FuseMount),
 		puid:        own.PUID,
 		pgid:        own.PGID,
-		chown:       os.Chown,
-		lchown:      os.Lchown,
+		// chown uses a no-follow primitive (not os.Chown, which follows symlinks): an arr-uid
+		// process must not be able to swap a created dir for a symlink and trick root into
+		// chowning an arbitrary path (S4a). lchown already never follows the link.
+		chown:  chownDirNoFollow,
+		lchown: os.Lchown,
 	}
+}
+
+// chownDirNoFollow chowns a directory WITHOUT following symlinks: it opens the path with
+// O_NOFOLLOW|O_DIRECTORY (so the open fails — ELOOP/ENOTDIR — if the final component is a
+// symlink or not a directory) and fchowns the resulting fd. This atomically closes the
+// TOCTOU where the path is swapped for a symlink between MkdirAll and chown (S4a); os.Chown
+// would follow such a symlink and chown an attacker-chosen target.
+func chownDirNoFollow(path string, uid, gid int) error {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_DIRECTORY, 0)
+	if err != nil {
+		return err
+	}
+	defer f.Close() //nolint:errcheck
+	return f.Chown(uid, gid)
 }
 
 // chownEnabled reports whether a puid+pgid chown should be applied.
@@ -195,9 +213,15 @@ func (m *manager) mkdirAllOwned(dir string) error {
 		return err
 	}
 
-	// Chown the directories we created. Order does not matter for chown; we skip any
-	// that vanished (best-effort, but surface real errors).
+	// Chown the directories we created. We skip any that vanished (best-effort), and — S4b —
+	// never chown download_dir itself or anything above it: when download_dir does not
+	// pre-exist, MkdirAll creates it (and possibly parents the operator owns), but only the
+	// category/name tree strictly BELOW download_dir is Lazarr's to own. The chown primitive
+	// itself is no-follow (S4a).
 	for _, p := range created {
+		if p == m.downloadDir || mustBeUnder(m.downloadDir, p) != nil {
+			continue // download_dir or an ancestor above it — not ours to chown
+		}
 		if err := m.chown(p, m.puid, m.pgid); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("chown dir %q: %w", p, err)
 		}

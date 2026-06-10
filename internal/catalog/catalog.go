@@ -12,6 +12,17 @@ const (
 	StateError        State = "error"        // checkcached/torrentinfo failed, or dead-cache
 )
 
+// CacheStatus reports whether the content is still available on TorBox's CDN.
+// Set by the repair scanner (engine.RepairScan). "evicted" means checkcached returned
+// false — the content is gone and playback would fail with ErrPurged.
+type CacheStatus string
+
+const (
+	CacheStatusUnknown CacheStatus = ""        // not yet checked
+	CacheStatusCached  CacheStatus = "cached"  // confirmed available
+	CacheStatusEvicted CacheStatus = "evicted" // no longer on TorBox CDN
+)
+
 // Release is one grabbed item (one torrent), keyed by infohash.
 type Release struct {
 	Hash       string // infohash
@@ -22,9 +33,16 @@ type Release struct {
 	State      State
 	Cached     bool  // checkcached hit at grab time?
 	TorBoxID   int64 // set only while materialized
-	AddedOn    int64 // unix; when added to the catalog
+	AddedOn    int64 // unix; when added to the catalog (grab time)
 	LastAccess int64 // unix; drives the idle reaper
-	CreatedAt  int64
+	// MaterializedAt is the unix time the release last entered StateMaterialized
+	// (0 when not materialized). The max-hold reaper measures the hold window from
+	// THIS, not AddedOn — a release grabbed long before its first playback must not
+	// be an instant max-hold candidate the moment it materializes (add/delete churn).
+	MaterializedAt  int64
+	CreatedAt       int64
+	CacheStatus     CacheStatus // set by repair scanner; "" = not yet checked
+	LastCacheCheck  int64       // unix; when CacheStatus was last set
 }
 
 // File is one file within a release.
@@ -44,19 +62,43 @@ type DLLink struct {
 	ExpiresAt int64
 }
 
+// ReleaseFilter is the query for ListReleases (Web UI table).
+type ReleaseFilter struct {
+	Q        string // substring match on name or hash (case-insensitive); empty = all
+	State    State  // empty = all states
+	Category string // empty = all categories
+	Limit    int    // 0 → default (50)
+	Offset   int
+}
+
 // Store is the catalog contract. All timestamps are unix seconds.
 type Store interface {
 	UpsertRelease(r *Release, files []File) error
 	GetRelease(hash string) (*Release, []File, error)
 	ListByCategory(category string) ([]*Release, error)
+	// ListReleases returns releases matching f with a total count (for pagination).
+	ListReleases(f ReleaseFilter) ([]*Release, int, error)
 	SetState(hash string, st State, torboxID int64) error
 	TouchAccess(hash string, ts int64) error
 	// IdleCandidates returns materialized releases whose LastAccess is before ts.
 	IdleCandidates(before int64) ([]*Release, error)
-	// OverMaxHold returns materialized releases added before ts (hard ceiling).
+	// OverMaxHold returns materialized releases whose MaterializedAt is before ts
+	// (hard ceiling, measured from materialize time — not grab time).
 	OverMaxHold(before int64) ([]*Release, error)
 	// MaterializedIDs returns the TorBox ids Lazarr believes are added (ToS audit).
 	MaterializedIDs() ([]int64, error)
+	// MaterializedReleases returns all releases currently in StateMaterialized. Drives the
+	// boot-time reconciliation sweep that releases crash/restart leftovers (B2).
+	MaterializedReleases() ([]*Release, error)
+	// ListAllHashes returns every hash in the catalog. Used by the repair scanner to
+	// batch-check availability with TorBox's checkcached endpoint (no TorBox adds).
+	ListAllHashes() ([]string, error)
+	// SetCacheStatus updates the cache_status and last_cache_check for a release.
+	// Called by engine.RepairScan after each checkcached batch.
+	SetCacheStatus(hash string, status CacheStatus, checkedAt int64) error
+	// ListEvicted returns releases whose CacheStatus is CacheStatusEvicted, newest first.
+	// These are items that are no longer available on TorBox's CDN.
+	ListEvicted() ([]*Release, error)
 	GetLink(hash string, fileID int) (*DLLink, error)
 	SetLink(l *DLLink) error
 	DeleteRelease(hash string) error

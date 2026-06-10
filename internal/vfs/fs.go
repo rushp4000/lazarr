@@ -89,7 +89,22 @@ func (f *FS) Mount() error {
 
 	srv, err := fs.Mount(f.mount, root, opts)
 	if err != nil {
-		return err
+		// A prior instance killed with SIGKILL (or any unclean exit) leaves a stale FUSE
+		// mount whose kernel connection is dead — stat returns ENOTCONN ("transport endpoint
+		// is not connected") and fs.Mount cannot mount over it, so the daemon would
+		// crash-loop on every restart. Detach the dead mount (lazy) and retry once so a
+		// hard-crashed daemon recovers automatically. This is critical for B2: boot
+		// reconciliation (which releases TorBox leftovers) runs only AFTER a successful
+		// mount, so a wedged remount would otherwise pin the very leak reconcile must clear.
+		if isStaleMount(f.mount) {
+			slog.Warn("vfs: clearing stale FUSE mount left by a prior unclean exit, retrying",
+				"path", f.mount)
+			_ = syscall.Unmount(f.mount, syscall.MNT_DETACH)
+			srv, err = fs.Mount(f.mount, root, opts)
+		}
+		if err != nil {
+			return err
+		}
 	}
 
 	f.mu.Lock()
@@ -98,6 +113,14 @@ func (f *FS) Mount() error {
 
 	slog.Info("vfs mounted", "path", f.mount)
 	return nil
+}
+
+// isStaleMount reports whether path is a dead/stale FUSE mount whose kernel connection is
+// gone — the state a SIGKILL'd FUSE daemon leaves behind. The kernel surfaces it as ENOTCONN
+// ("transport endpoint is not connected") on any stat of the mount root.
+func isStaleMount(path string) bool {
+	_, err := os.Stat(path)
+	return errors.Is(err, syscall.ENOTCONN)
 }
 
 // Close unmounts the FUSE filesystem cleanly.  Any in-flight operations are
@@ -173,11 +196,30 @@ func (f *FS) Healthy() bool {
 	}
 	// A stat of the mount root reaches the kernel FUSE layer; if the connection is
 	// dead/stale the kernel returns an error (e.g. ENOTCONN) rather than succeeding.
-	if _, err := os.Stat(mount); err != nil {
+	//
+	// But a *wedged* FUSE mount (server goroutine stuck, kernel waiting on a reply) can
+	// make os.Stat block forever. Healthy() is called from the single reaper goroutine and
+	// from /health, so a blocking stat would hang reaping (no idle/max-hold deletes → items
+	// held past 30d, a ToS risk) and the admin endpoint. Run the stat off-goroutine under a
+	// short deadline; a timeout counts as unhealthy. The goroutine leaks only on a truly
+	// wedged stat (it unblocks if/when the mount recovers or is force-unmounted) — an
+	// acceptable, bounded leak versus wedging the daemon's liveness path (S3).
+	done := make(chan error, 1) // buffered so the goroutine never blocks on send after timeout
+	go func() {
+		_, err := os.Stat(mount)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		return err == nil
+	case <-time.After(healthStatTimeout):
 		return false
 	}
-	return true
 }
+
+// healthStatTimeout bounds the mount-root stat in Healthy() so a wedged FUSE mount cannot
+// hang the reaper goroutine or the /health endpoint.
+const healthStatTimeout = 2 * time.Second
 
 // ---------------------------------------------------------------------------
 // FUSE node types

@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 
 	// Register modernc pure-Go SQLite driver (CGO_ENABLED=0 safe).
 	_ "modernc.org/sqlite"
@@ -81,17 +82,20 @@ func applyPragmas(db *sql.DB) error {
 
 const schemaSQL = `
 CREATE TABLE IF NOT EXISTS release (
-    hash        TEXT    PRIMARY KEY,
-    name        TEXT    NOT NULL DEFAULT '',
-    category    TEXT    NOT NULL DEFAULT '',
-    magnet      TEXT    NOT NULL DEFAULT '',
-    total_size  INTEGER NOT NULL DEFAULT 0,
-    state       TEXT    NOT NULL DEFAULT 'virtual',
-    cached      INTEGER NOT NULL DEFAULT 0,
-    torbox_id   INTEGER NOT NULL DEFAULT 0,
-    added_on    INTEGER NOT NULL DEFAULT 0,
-    last_access INTEGER NOT NULL DEFAULT 0,
-    created_at  INTEGER NOT NULL DEFAULT 0
+    hash             TEXT    PRIMARY KEY,
+    name             TEXT    NOT NULL DEFAULT '',
+    category         TEXT    NOT NULL DEFAULT '',
+    magnet           TEXT    NOT NULL DEFAULT '',
+    total_size       INTEGER NOT NULL DEFAULT 0,
+    state            TEXT    NOT NULL DEFAULT 'virtual',
+    cached           INTEGER NOT NULL DEFAULT 0,
+    torbox_id        INTEGER NOT NULL DEFAULT 0,
+    added_on         INTEGER NOT NULL DEFAULT 0,
+    last_access      INTEGER NOT NULL DEFAULT 0,
+    materialized_at  INTEGER NOT NULL DEFAULT 0,
+    created_at       INTEGER NOT NULL DEFAULT 0,
+    cache_status     TEXT    NOT NULL DEFAULT '',
+    last_cache_check INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS file (
@@ -119,9 +123,76 @@ CREATE INDEX IF NOT EXISTS idx_release_last_access ON release(state, last_access
 CREATE INDEX IF NOT EXISTS idx_release_added_on    ON release(state, added_on);
 `
 
+// materializedAtIndexSQL is created AFTER the materialized_at column is ensured (it may be
+// added by ALTER on a pre-existing DB), so it cannot live in schemaSQL above.
+const materializedAtIndexSQL = `
+CREATE INDEX IF NOT EXISTS idx_release_materialized_at ON release(state, materialized_at);
+`
+
 func applyMigrations(db *sql.DB) error {
 	if _, err := db.Exec(schemaSQL); err != nil {
 		return fmt.Errorf("catalog: apply migrations: %w", err)
+	}
+	// B1: materialized_at drives the max-hold reaper from materialize time (not grab time).
+	// On a fresh DB schemaSQL already created the column; on a pre-existing DB (the canary)
+	// the table exists without it, so add it idempotently here.
+	if err := ensureColumn(db, "release", "materialized_at", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if _, err := db.Exec(materializedAtIndexSQL); err != nil {
+		return fmt.Errorf("catalog: create materialized_at index: %w", err)
+	}
+	// Repair-scan columns: added after initial schema so existing DBs get them.
+	if err := ensureColumn(db, "release", "cache_status", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := ensureColumn(db, "release", "last_cache_check", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_release_cache_status ON release(cache_status)`); err != nil {
+		return fmt.Errorf("catalog: create cache_status index: %w", err)
+	}
+	// Backfill pre-existing materialized rows to NOW so they are not instantly
+	// reap-eligible (materialized_at=0 would otherwise read as "the epoch", i.e. ancient).
+	// New materialized rows get a real stamp via SetState; the > 0 guard in OverMaxHold
+	// keeps any that slip through (e.g. a crash mid-backfill) out of the reap set.
+	if _, err := db.Exec(
+		`UPDATE release SET materialized_at = CAST(strftime('%s','now') AS INTEGER)
+		 WHERE state = 'materialized' AND materialized_at = 0`,
+	); err != nil {
+		return fmt.Errorf("catalog: backfill materialized_at: %w", err)
+	}
+	return nil
+}
+
+// ensureColumn adds a column to a table if it is not already present. Idempotent: a
+// re-run (or a fresh DB where schemaSQL already created the column) is a no-op.
+func ensureColumn(db *sql.DB, table, column, decl string) error {
+	rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return fmt.Errorf("catalog: table_info(%s): %w", table, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			cid        int
+			name, typ  string
+			notNull    int
+			dflt       sql.NullString
+			primaryKey int
+		)
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &dflt, &primaryKey); err != nil {
+			return fmt.Errorf("catalog: scan table_info(%s): %w", table, err)
+		}
+		if name == column {
+			return rows.Err() // already present
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("catalog: iterate table_info(%s): %w", table, err)
+	}
+	if _, err := db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, decl)); err != nil {
+		return fmt.Errorf("catalog: add column %s.%s: %w", table, column, err)
 	}
 	return nil
 }
@@ -141,22 +212,27 @@ func (s *sqliteStore) UpsertRelease(r *Release, files []File) error {
 	_, err = tx.Exec(`
 		INSERT INTO release
 			(hash, name, category, magnet, total_size, state, cached,
-			 torbox_id, added_on, last_access, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 torbox_id, added_on, last_access, materialized_at, created_at,
+			 cache_status, last_cache_check)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(hash) DO UPDATE SET
-			name        = excluded.name,
-			category    = excluded.category,
-			magnet      = excluded.magnet,
-			total_size  = excluded.total_size,
-			state       = excluded.state,
-			cached      = excluded.cached,
-			torbox_id   = excluded.torbox_id,
-			added_on    = excluded.added_on,
-			last_access = excluded.last_access,
-			created_at  = excluded.created_at`,
+			name             = excluded.name,
+			category         = excluded.category,
+			magnet           = excluded.magnet,
+			total_size       = excluded.total_size,
+			state            = excluded.state,
+			cached           = excluded.cached,
+			torbox_id        = excluded.torbox_id,
+			added_on         = excluded.added_on,
+			last_access      = excluded.last_access,
+			materialized_at  = excluded.materialized_at,
+			created_at       = excluded.created_at,
+			cache_status     = excluded.cache_status,
+			last_cache_check = excluded.last_cache_check`,
 		r.Hash, r.Name, r.Category, r.Magnet, r.TotalSize,
 		string(r.State), boolToInt(r.Cached), r.TorBoxID,
-		r.AddedOn, r.LastAccess, r.CreatedAt,
+		r.AddedOn, r.LastAccess, r.MaterializedAt, r.CreatedAt,
+		string(r.CacheStatus), r.LastCacheCheck,
 	)
 	if err != nil {
 		return fmt.Errorf("catalog: upsert release %q: %w", r.Hash, err)
@@ -186,7 +262,8 @@ func (s *sqliteStore) UpsertRelease(r *Release, files []File) error {
 func (s *sqliteStore) GetRelease(hash string) (*Release, []File, error) {
 	row := s.db.QueryRow(`
 		SELECT hash, name, category, magnet, total_size, state, cached,
-		       torbox_id, added_on, last_access, created_at
+		       torbox_id, added_on, last_access, materialized_at, created_at,
+		       cache_status, last_cache_check
 		FROM release WHERE hash = ?`, hash)
 
 	r, err := scanRelease(row)
@@ -208,7 +285,8 @@ func (s *sqliteStore) GetRelease(hash string) (*Release, []File, error) {
 func (s *sqliteStore) ListByCategory(category string) ([]*Release, error) {
 	rows, err := s.db.Query(`
 		SELECT hash, name, category, magnet, total_size, state, cached,
-		       torbox_id, added_on, last_access, created_at
+		       torbox_id, added_on, last_access, materialized_at, created_at,
+		       cache_status, last_cache_check
 		FROM release WHERE category = ?`, category)
 	if err != nil {
 		return nil, fmt.Errorf("catalog: list by category %q: %w", category, err)
@@ -229,13 +307,91 @@ func (s *sqliteStore) ListByCategory(category string) ([]*Release, error) {
 	return releases, nil
 }
 
+const defaultListLimit = 50
+
+// ListReleases returns releases matching f with the total matching count. Used by
+// the Web UI table; supports text search, state/category filters, and pagination.
+func (s *sqliteStore) ListReleases(f ReleaseFilter) ([]*Release, int, error) {
+	if f.Limit <= 0 {
+		f.Limit = defaultListLimit
+	}
+
+	// Build WHERE predicates. We use LIKE for the q search so it works without
+	// loading extensions; case sensitivity is acceptable for hashes.
+	var where []string
+	var args []any
+	if f.Q != "" {
+		pat := "%" + f.Q + "%"
+		where = append(where, "(name LIKE ? OR hash LIKE ?)")
+		args = append(args, pat, pat)
+	}
+	if f.State != "" {
+		where = append(where, "state = ?")
+		args = append(args, string(f.State))
+	}
+	if f.Category != "" {
+		where = append(where, "category = ?")
+		args = append(args, f.Category)
+	}
+
+	clause := ""
+	if len(where) > 0 {
+		clause = "WHERE " + strings.Join(where, " AND ")
+	}
+
+	// Total count.
+	var total int
+	if err := s.db.QueryRow(
+		"SELECT COUNT(*) FROM release "+clause, args...,
+	).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("catalog: list releases count: %w", err)
+	}
+
+	// Paginated rows, newest-grabbed first.
+	rows, err := s.db.Query(
+		`SELECT hash, name, category, magnet, total_size, state, cached,
+		        torbox_id, added_on, last_access, materialized_at, created_at,
+		        cache_status, last_cache_check
+		 FROM release `+clause+`
+		 ORDER BY added_on DESC
+		 LIMIT ? OFFSET ?`,
+		append(args, f.Limit, f.Offset)...,
+	)
+	if err != nil {
+		return nil, 0, fmt.Errorf("catalog: list releases: %w", err)
+	}
+	defer rows.Close()
+	rels, err := collectReleases(rows)
+	if err != nil {
+		return nil, 0, err
+	}
+	return rels, total, nil
+}
+
 // SetState updates a release's state and torbox_id. Per the spec, torbox_id
 // is set only while materialized; clearing it (0) happens when releasing.
+//
+// materialized_at (B1) is stamped to NOW when entering StateMaterialized and zeroed
+// on every other transition (virtual/error) so the max-hold reaper measures the hold
+// window from materialize time, not grab time.
 func (s *sqliteStore) SetState(hash string, st State, torboxID int64) error {
-	res, err := s.db.Exec(
-		`UPDATE release SET state = ?, torbox_id = ? WHERE hash = ?`,
-		string(st), torboxID, hash,
+	var (
+		res sql.Result
+		err error
 	)
+	if st == StateMaterialized {
+		res, err = s.db.Exec(
+			`UPDATE release SET state = ?, torbox_id = ?,
+			        materialized_at = CAST(strftime('%s','now') AS INTEGER)
+			 WHERE hash = ?`,
+			string(st), torboxID, hash,
+		)
+	} else {
+		res, err = s.db.Exec(
+			`UPDATE release SET state = ?, torbox_id = ?, materialized_at = 0 WHERE hash = ?`,
+			string(st), torboxID, hash,
+		)
+	}
 	if err != nil {
 		return fmt.Errorf("catalog: set state %q->%q: %w", hash, st, err)
 	}
@@ -257,7 +413,8 @@ func (s *sqliteStore) TouchAccess(hash string, ts int64) error {
 func (s *sqliteStore) IdleCandidates(before int64) ([]*Release, error) {
 	rows, err := s.db.Query(`
 		SELECT hash, name, category, magnet, total_size, state, cached,
-		       torbox_id, added_on, last_access, created_at
+		       torbox_id, added_on, last_access, materialized_at, created_at,
+		       cache_status, last_cache_check
 		FROM release
 		WHERE state = 'materialized' AND last_access < ?`, before)
 	if err != nil {
@@ -267,15 +424,33 @@ func (s *sqliteStore) IdleCandidates(before int64) ([]*Release, error) {
 	return collectReleases(rows)
 }
 
-// OverMaxHold returns materialized releases whose added_on < before.
+// OverMaxHold returns materialized releases whose materialized_at < before. The window
+// is measured from materialize time (B1): a release grabbed long before its first
+// playback must not be an instant max-hold candidate the moment it materializes. The
+// materialized_at > 0 guard excludes any unstamped row (defence-in-depth vs the epoch).
 func (s *sqliteStore) OverMaxHold(before int64) ([]*Release, error) {
 	rows, err := s.db.Query(`
 		SELECT hash, name, category, magnet, total_size, state, cached,
-		       torbox_id, added_on, last_access, created_at
+		       torbox_id, added_on, last_access, materialized_at, created_at,
+		       cache_status, last_cache_check
 		FROM release
-		WHERE state = 'materialized' AND added_on < ?`, before)
+		WHERE state = 'materialized' AND materialized_at > 0 AND materialized_at < ?`, before)
 	if err != nil {
 		return nil, fmt.Errorf("catalog: over max hold: %w", err)
+	}
+	defer rows.Close()
+	return collectReleases(rows)
+}
+
+// MaterializedReleases returns all releases currently in StateMaterialized (B2 reconcile).
+func (s *sqliteStore) MaterializedReleases() ([]*Release, error) {
+	rows, err := s.db.Query(`
+		SELECT hash, name, category, magnet, total_size, state, cached,
+		       torbox_id, added_on, last_access, materialized_at, created_at,
+		       cache_status, last_cache_check
+		FROM release WHERE state = 'materialized'`)
+	if err != nil {
+		return nil, fmt.Errorf("catalog: materialized releases: %w", err)
 	}
 	defer rows.Close()
 	return collectReleases(rows)
@@ -340,6 +515,52 @@ func (s *sqliteStore) SetLink(l *DLLink) error {
 	return nil
 }
 
+// ListAllHashes returns every hash in the catalog (repair scanner batch input).
+func (s *sqliteStore) ListAllHashes() ([]string, error) {
+	rows, err := s.db.Query(`SELECT hash FROM release`)
+	if err != nil {
+		return nil, fmt.Errorf("catalog: list all hashes: %w", err)
+	}
+	defer rows.Close()
+	var hashes []string
+	for rows.Next() {
+		var h string
+		if err := rows.Scan(&h); err != nil {
+			return nil, fmt.Errorf("catalog: scan hash: %w", err)
+		}
+		hashes = append(hashes, h)
+	}
+	return hashes, rows.Err()
+}
+
+// SetCacheStatus updates the availability status of a release (repair scanner output).
+func (s *sqliteStore) SetCacheStatus(hash string, status CacheStatus, checkedAt int64) error {
+	res, err := s.db.Exec(
+		`UPDATE release SET cache_status = ?, last_cache_check = ? WHERE hash = ?`,
+		string(status), checkedAt, hash,
+	)
+	if err != nil {
+		return fmt.Errorf("catalog: set cache status %q: %w", hash, err)
+	}
+	return requireOneRow(res, "set cache status", hash)
+}
+
+// ListEvicted returns releases whose content is no longer available on TorBox's CDN,
+// newest-grabbed first. Used by the repair tab in the Web UI.
+func (s *sqliteStore) ListEvicted() ([]*Release, error) {
+	rows, err := s.db.Query(`
+		SELECT hash, name, category, magnet, total_size, state, cached,
+		       torbox_id, added_on, last_access, materialized_at, created_at,
+		       cache_status, last_cache_check
+		FROM release WHERE cache_status = 'evicted'
+		ORDER BY added_on DESC`)
+	if err != nil {
+		return nil, fmt.Errorf("catalog: list evicted: %w", err)
+	}
+	defer rows.Close()
+	return collectReleases(rows)
+}
+
 // DeleteRelease deletes a release and, via ON DELETE CASCADE, its file and
 // dl_link rows.
 func (s *sqliteStore) DeleteRelease(hash string) error {
@@ -379,16 +600,19 @@ func scanRelease(r rowScanner) (*Release, error) {
 	var rel Release
 	var state string
 	var cached int
+	var cacheStatus string
 	err := r.Scan(
 		&rel.Hash, &rel.Name, &rel.Category, &rel.Magnet,
 		&rel.TotalSize, &state, &cached,
-		&rel.TorBoxID, &rel.AddedOn, &rel.LastAccess, &rel.CreatedAt,
+		&rel.TorBoxID, &rel.AddedOn, &rel.LastAccess, &rel.MaterializedAt, &rel.CreatedAt,
+		&cacheStatus, &rel.LastCacheCheck,
 	)
 	if err != nil {
 		return nil, err
 	}
 	rel.State = State(state)
 	rel.Cached = cached != 0
+	rel.CacheStatus = CacheStatus(cacheStatus)
 	return &rel, nil
 }
 

@@ -64,3 +64,7 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # Stamp the binary version into the image so /health reports the real tag, not
+          # "dev" (S7). github.ref_name on a v* tag push is the tag, e.g. v1.0.0.
+          build-args: |
+            VERSION=${{ github.ref_name }}

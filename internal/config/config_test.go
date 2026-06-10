@@ -86,6 +86,16 @@ func TestValidate(t *testing.T) {
 				c.Ownership.PGID = 1003
 			},
 		},
+		{
+			name:    "puid set without pgid (S5)",
+			mutate:  func(c *Config) { c.Ownership.PUID = 1003; c.Ownership.PGID = 0 },
+			wantErr: "must both be set",
+		},
+		{
+			name:    "pgid set without puid (S5)",
+			mutate:  func(c *Config) { c.Ownership.PUID = 0; c.Ownership.PGID = 1003 },
+			wantErr: "must both be set",
+		},
 	}
 
 	for _, tc := range cases {

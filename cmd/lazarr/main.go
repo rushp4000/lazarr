@@ -20,6 +20,7 @@ import (
 
 	"github.com/rushp4000/lazarr/internal/catalog"
 	"github.com/rushp4000/lazarr/internal/config"
+	"github.com/rushp4000/lazarr/internal/constants"
 	"github.com/rushp4000/lazarr/internal/materialize"
 	"github.com/rushp4000/lazarr/internal/metrics"
 	"github.com/rushp4000/lazarr/internal/qbit"
@@ -27,6 +28,7 @@ import (
 	"github.com/rushp4000/lazarr/internal/torbox"
 	"github.com/rushp4000/lazarr/internal/version"
 	"github.com/rushp4000/lazarr/internal/vfs"
+	"github.com/rushp4000/lazarr/internal/webui"
 )
 
 // auditInterval is how often the ToS-audit loop diffs mylist vs the materialized
@@ -64,20 +66,39 @@ func main() {
 	}
 	defer func() { _ = store.Close() }()
 
+	startTime := time.Now()
 	tb := torbox.New(cfg.TorBox)
 
 	// Best-effort connectivity/slot check; non-fatal so lazarr still boots if
 	// TorBox is briefly unreachable. Never logs the API key.
+	var cachedAccount *torbox.Account
 	if acct, err := tb.UserMe(); err != nil {
 		slog.Warn("torbox user/me check failed (continuing)", "err", err)
 	} else {
+		cachedAccount = acct
 		slog.Info("torbox account", "plan", acct.Plan, "active_slots", acct.ActiveSlots,
 			"long_term_storage", acct.LongTermStore, "cooldown_until", acct.CooldownUntil)
 	}
 
 	sym := symlink.New(cfg.Paths, cfg.Ownership)
 
-	qsrv := qbit.New(qbit.Deps{Config: cfg, Store: store, TorBox: tb, Symlink: sym})
+	// Phase 2: the lazy playback path — materialize engine, FUSE mount, idle + max-hold
+	// reapers, and the ToS-audit loop. The engine is constructed BEFORE the qbit server and
+	// the mount so it can be wired into both (qbit releases on delete; the mount drives
+	// reads), and so SetMountHealthy lands BEFORE Start (S1: no data race on mountHealthy).
+	eng, err := materialize.New(materialize.Deps{
+		Store:         store,
+		TorBox:        tb,
+		Policy:        cfg.Policy,
+		ProbeCacheDir: cfg.Paths.ProbeCacheDir,
+	})
+	if err != nil {
+		slog.Error("materialize engine", "err", err)
+		os.Exit(1)
+	}
+
+	// qbit gets the engine so torrents/delete releases an in-flight materialization (S2).
+	qsrv := qbit.New(qbit.Deps{Config: cfg, Store: store, TorBox: tb, Symlink: sym, Engine: eng})
 
 	srv := &http.Server{
 		Addr:              cfg.QBit.Listen,
@@ -97,23 +118,10 @@ func main() {
 		}
 	}()
 
-	// Phase 2: the lazy playback path — materialize engine, FUSE mount, idle +
-	// max-hold reapers, and the ToS-audit loop (diff mylist vs the materialized set).
-	eng, err := materialize.New(materialize.Deps{
-		Store:         store,
-		TorBox:        tb,
-		Policy:        cfg.Policy,
-		ProbeCacheDir: cfg.Paths.ProbeCacheDir,
-	})
-	if err != nil {
-		slog.Error("materialize engine", "err", err)
-		os.Exit(1)
-	}
-	eng.Start(ctx) // idle + max-hold reapers; stop on ctx cancel and at eng.Close.
-
 	fsys := vfs.New(cfg.Paths.FuseMount, store, eng)
 	if err := fsys.Mount(); err != nil {
-		// FUSE is the core of Phase 2 — without it nothing can be read/played.
+		// FUSE is the core of Phase 2 — without it nothing can be read/played. Close is safe
+		// here even though Start has not run yet (no reapers to stop, empty track).
 		slog.Error("vfs mount failed (need --cap-add SYS_ADMIN --device /dev/fuse)",
 			"mount", cfg.Paths.FuseMount, "err", err)
 		_ = eng.Close()
@@ -123,8 +131,10 @@ func main() {
 	// Broken-mount guard (CRITICAL): the reapers call Release -> ControlDelete. If the
 	// FUSE mount goes unhealthy on a transient blip the reapers must NOT mass-delete from
 	// the TorBox account. Hand the engine a cheap mount-health probe; the reapers skip a
-	// sweep (logging a Warn) whenever it reports unhealthy.
+	// sweep (logging a Warn) whenever it reports unhealthy. MUST be set before Start so the
+	// reaper goroutine never reads mountHealthy while this writes it (S1).
 	eng.SetMountHealthy(fsys.Healthy)
+	eng.Start(ctx) // idle + max-hold reapers; stop on ctx cancel and at eng.Close.
 
 	// Observability admin server (opt-in, separate port): /metrics (Prometheus) + /health
 	// (JSON). Disabled when metrics.listen is empty. Kept off the arr-facing qbit port; like
@@ -148,6 +158,32 @@ func main() {
 		}()
 	}
 
+	// Web UI server (opt-in, separate port). Disabled when webui.listen is empty.
+	// Kept off the arr-facing qbit port. Optionally protected by Basic Auth (set
+	// webui.username + webui.password); otherwise trusted-LAN unauthenticated.
+	var webuiSrv *http.Server
+	if cfg.WebUI.Listen != "" {
+		wp := newWebuiProvider(eng, fsys, store, sym, cfg, cachedAccount, startTime)
+		wh, err := webui.New(wp, cfg.WebUI.Username, cfg.WebUI.Password)
+		if err != nil {
+			slog.Error("webui setup", "err", err)
+			os.Exit(1)
+		}
+		webuiSrv = &http.Server{
+			Addr:              cfg.WebUI.Listen,
+			Handler:           wh,
+			ReadHeaderTimeout: 15 * time.Second,
+		}
+		go func() {
+			slog.Info("webui listening", "addr", cfg.WebUI.Listen,
+				"auth", cfg.WebUI.Username != "")
+			if err := webuiSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				slog.Error("webui server", "err", err)
+				stop()
+			}
+		}()
+	}
+
 	// ToS-audit loop: periodic proof that the account holds nothing we believe is
 	// released (scoped to Lazarr-added ids while it coexists with decypharr).
 	go func() {
@@ -165,6 +201,26 @@ func main() {
 		}
 	}()
 
+	// Repair-scan loop: daily checkcached sweep over the whole catalog to find content
+	// that TorBox has evicted from its CDN. No TorBox adds; purely read-only. Results
+	// are written to the catalog and visible in the Web UI repair tab.
+	go func() {
+		t := time.NewTicker(constants.DefaultRepairScanEvery)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if evicted, err := eng.RepairScan(ctx); err != nil {
+					slog.Warn("repair scan failed", "err", err)
+				} else if len(evicted) > 0 {
+					slog.Warn("repair scan: evicted content detected", "count", len(evicted))
+				}
+			}
+		}
+	}()
+
 	<-ctx.Done()
 	slog.Info("shutting down")
 
@@ -176,6 +232,11 @@ func main() {
 	if adminSrv != nil {
 		if err := adminSrv.Shutdown(shutdownCtx); err != nil {
 			slog.Error("admin shutdown", "err", err)
+		}
+	}
+	if webuiSrv != nil {
+		if err := webuiSrv.Shutdown(shutdownCtx); err != nil {
+			slog.Error("webui shutdown", "err", err)
 		}
 	}
 
@@ -209,3 +270,134 @@ func (h healthProvider) SlotsInUse() int      { return h.eng.SlotsInUse() }
 func (h healthProvider) SlotsTotal() int      { return h.eng.SlotsTotal() }
 func (h healthProvider) LastAuditUnix() int64 { return h.eng.LastAuditUnix() }
 func (h healthProvider) Version() string      { return version.Version }
+
+// ─── Web UI provider ──────────────────────────────────────────────────────────
+
+// webuiEngine is the slice of *materialize.materializer the webuiProvider needs.
+// It deliberately does not overlap with engStats so both can coexist without a
+// wide interface, and uses the concrete *materialize.materializer type in practice.
+type webuiEngine interface {
+	SlotsInUse() int
+	SlotsTotal() int
+	LastAuditUnix() int64
+	Release(hash string) error
+	AuditTOS() error
+	RepairScan(ctx context.Context) ([]materialize.RepairEntry, error)
+	MaterializedSnapshot() []materialize.MaterializedEntry
+}
+
+// webuiProvider adapts Lazarr's concrete internals to webui.Provider.
+type webuiProvider struct {
+	eng     webuiEngine
+	fsys    *vfs.FS
+	store   catalog.Store
+	sym     symlink.Manager
+	cfg     *config.Config
+	account *webui.AccountInfo // cached from boot-time UserMe (may be nil)
+	start   time.Time
+}
+
+func newWebuiProvider(
+	eng webuiEngine,
+	fsys *vfs.FS,
+	store catalog.Store,
+	sym symlink.Manager,
+	cfg *config.Config,
+	acct *torbox.Account,
+	start time.Time,
+) *webuiProvider {
+	wp := &webuiProvider{eng: eng, fsys: fsys, store: store, sym: sym, cfg: cfg, start: start}
+	if acct != nil {
+		wp.account = &webui.AccountInfo{
+			Plan:          acct.Plan,
+			ActiveSlots:   acct.ActiveSlots,
+			CooldownUntil: acct.CooldownUntil,
+			LongTermStore: acct.LongTermStore,
+		}
+	}
+	return wp
+}
+
+func (p *webuiProvider) Status() webui.StatusSnapshot {
+	return webui.StatusSnapshot{
+		Version:       version.Version,
+		UptimeSeconds: int64(time.Since(p.start).Seconds()),
+		Mounted:       p.fsys.Healthy(),
+		SlotsInUse:    p.eng.SlotsInUse(),
+		SlotsTotal:    p.eng.SlotsTotal(),
+		LastAuditUnix: p.eng.LastAuditUnix(),
+		Account:       p.account,
+	}
+}
+
+func (p *webuiProvider) ListReleases(f catalog.ReleaseFilter) ([]*catalog.Release, int, error) {
+	return p.store.ListReleases(f)
+}
+
+func (p *webuiProvider) MaterializedSet() []webui.MaterializedItem {
+	snap := p.eng.MaterializedSnapshot()
+	out := make([]webui.MaterializedItem, len(snap))
+	for i, e := range snap {
+		out[i] = webui.MaterializedItem{
+			Hash:       e.Hash,
+			TorBoxID:   e.TorBoxID,
+			Refs:       e.Refs,
+			LastUsedNs: e.LastUsedNs,
+		}
+	}
+	return out
+}
+
+func (p *webuiProvider) MetricsSummary() (*metrics.Summary, error) {
+	return metrics.GatherSummary()
+}
+
+func (p *webuiProvider) ForceRelease(hash string) error {
+	return p.eng.Release(hash)
+}
+
+func (p *webuiProvider) TriggerAudit() error {
+	return p.eng.AuditTOS()
+}
+
+func (p *webuiProvider) TriggerRepairScan(ctx context.Context) ([]materialize.RepairEntry, error) {
+	return p.eng.RepairScan(ctx)
+}
+
+func (p *webuiProvider) ListEvicted() ([]*catalog.Release, error) {
+	return p.store.ListEvicted()
+}
+
+// ForgetRelease removes a release from Lazarr entirely — engine release (if materialized),
+// symlinks deleted, catalog entry removed — so the arr's next health-check flags the file
+// missing and triggers a re-search on TorBox / Torrentio.
+func (p *webuiProvider) ForgetRelease(hash string) error {
+	// Best-effort engine release first (no-op if not materialized, returns ErrNotFound).
+	_ = p.eng.Release(hash)
+	if err := p.sym.Remove(hash); err != nil {
+		slog.Warn("webui: forget: remove symlinks", "hash", hash, "err", err)
+	}
+	return p.store.DeleteRelease(hash)
+}
+
+func (p *webuiProvider) SafeConfig() webui.SafeConfig {
+	return webui.SafeConfig{
+		TorBoxAPIBase: p.cfg.TorBox.APIBase,
+		// api_key intentionally omitted
+		QBitListen:    p.cfg.QBit.Listen,
+		AdminListen:   p.cfg.Metrics.Listen,
+		WebUIListen:   p.cfg.WebUI.Listen,
+		DownloadDir:   p.cfg.Paths.DownloadDir,
+		FuseMount:     p.cfg.Paths.FuseMount,
+		DBPath:        p.cfg.Paths.DBPath,
+		Categories:    p.cfg.Categories,
+		AllowUncached: p.cfg.Policy.AllowUncached,
+		IdleTTL:       p.cfg.Policy.IdleTTL.D().String(),
+		MaxHold:       p.cfg.Policy.MaxHold.D().String(),
+		ActiveSlots:   p.cfg.Policy.ActiveSlots,
+		ProbeCache:    p.cfg.Policy.ProbeCache,
+		OwnershipPUID: p.cfg.Ownership.PUID,
+		OwnershipPGID: p.cfg.Ownership.PGID,
+		AuthEnabled:   p.cfg.WebUI.Username != "",
+	}
+}

@@ -7,6 +7,7 @@ import (
 
 	"github.com/rushp4000/lazarr/internal/catalog"
 	"github.com/rushp4000/lazarr/internal/config"
+	"github.com/rushp4000/lazarr/internal/metrics"
 	"github.com/rushp4000/lazarr/internal/torbox"
 )
 
@@ -172,6 +173,154 @@ func TestReapers_SkipWhenMountUnhealthy(t *testing.T) {
 			t.Fatalf("ControlDelete called %d times while mount healthy; want 1", tb.deleteCount())
 		}
 	})
+
+	// S3: a skipped sweep increments lazarr_reaper_skipped_total so an operator can alert on
+	// "reaping paused" (items held past max-hold while the mount is wedged).
+	t.Run("unhealthy increments skip metric", func(t *testing.T) {
+		before, err := metrics.GatherSummary()
+		if err != nil {
+			t.Fatalf("GatherSummary: %v", err)
+		}
+		m, _, _ := mk(false)
+		m.runReapOnceGuarded()
+		after, err := metrics.GatherSummary()
+		if err != nil {
+			t.Fatalf("GatherSummary: %v", err)
+		}
+		if after.ReaperSkippedTotal != before.ReaperSkippedTotal+1 {
+			t.Fatalf("reaper_skipped_total = %v, want %v (one skip)",
+				after.ReaperSkippedTotal, before.ReaperSkippedTotal+1)
+		}
+	})
+}
+
+// --- B2: untracked-release leak + boot reconciliation -------------------------------------
+
+// TestRelease_UntrackedLeftover proves Release deletes a TorBox item the store still
+// believes is materialized but that this process does not track (a crash/restart leftover),
+// instead of the old silent no-op that left it on the account forever (B2).
+func TestRelease_UntrackedLeftover(t *testing.T) {
+	store := newFakeStore()
+	tb := newFakeTorBox()
+	m, err := New(Deps{Store: store, TorBox: tb, Policy: config.Policy{ActiveSlots: 3}})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	m.SetLogger(quietLogger())
+	t.Cleanup(func() { _ = m.Close() })
+
+	store.addRelease(&catalog.Release{Hash: "leak", State: catalog.StateMaterialized, TorBoxID: 99})
+	if m.IsTracked("leak") {
+		t.Fatal("precondition: leftover must not be tracked")
+	}
+
+	if err := m.Release("leak"); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+	if tb.deleteCount() != 1 {
+		t.Fatalf("want 1 ControlDelete on untracked leftover, got %d", tb.deleteCount())
+	}
+	if got := store.state("leak"); got != catalog.StateVirtual {
+		t.Fatalf("want virtual after untracked release, got %q", got)
+	}
+}
+
+// TestReconcile_ReleasesLeftovers proves the boot sweep releases every store-believed
+// materialized row not tracked in memory, and leaves virtual rows untouched (B2).
+func TestReconcile_ReleasesLeftovers(t *testing.T) {
+	store := newFakeStore()
+	tb := newFakeTorBox()
+	m, err := New(Deps{Store: store, TorBox: tb, Policy: config.Policy{ActiveSlots: 3}})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	m.SetLogger(quietLogger())
+	t.Cleanup(func() { _ = m.Close() })
+
+	store.addRelease(&catalog.Release{Hash: "a", State: catalog.StateMaterialized, TorBoxID: 1})
+	store.addRelease(&catalog.Release{Hash: "b", State: catalog.StateMaterialized, TorBoxID: 2})
+	store.addRelease(&catalog.Release{Hash: "v", State: catalog.StateVirtual}) // already released
+
+	m.Reconcile()
+
+	if tb.deleteCount() != 2 {
+		t.Fatalf("want 2 ControlDelete (a,b), got %d", tb.deleteCount())
+	}
+	if store.state("a") != catalog.StateVirtual || store.state("b") != catalog.StateVirtual {
+		t.Fatalf("leftovers must be flipped to virtual: a=%q b=%q", store.state("a"), store.state("b"))
+	}
+	if store.state("v") != catalog.StateVirtual {
+		t.Fatalf("virtual row must be untouched, got %q", store.state("v"))
+	}
+}
+
+// TestRelease_InFlightMaterializeNotDeleted proves releaseUntracked defers to a concurrent
+// materialize: a store-only row whose hash is marked in-flight must NOT be deleted, so a
+// boot-reconcile / reaper never tears down an item a first-read is mid-materializing (B2).
+func TestRelease_InFlightMaterializeNotDeleted(t *testing.T) {
+	store := newFakeStore()
+	tb := newFakeTorBox()
+	m, err := New(Deps{Store: store, TorBox: tb, Policy: config.Policy{ActiveSlots: 3}})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	m.SetLogger(quietLogger())
+	t.Cleanup(func() { _ = m.Close() })
+
+	store.addRelease(&catalog.Release{Hash: "x", State: catalog.StateMaterialized, TorBoxID: 7})
+	m.mu.Lock()
+	m.inflight["x"] = struct{}{} // a materialize for "x" is in flight
+	m.mu.Unlock()
+
+	if err := m.Release("x"); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+	if tb.deleteCount() != 0 {
+		t.Fatalf("must NOT delete an in-flight materialize, got %d ControlDelete", tb.deleteCount())
+	}
+	if store.state("x") != catalog.StateMaterialized {
+		t.Fatalf("state must stay materialized, got %q", store.state("x"))
+	}
+
+	m.mu.Lock()
+	delete(m.inflight, "x")
+	m.mu.Unlock()
+}
+
+// --- B3: graceful shutdown force-releases pinned entries -----------------------------------
+
+// TestClose_ForceReleasesPinnedEntry proves Close tears down an entry that still has active
+// readers (refs>0) after the drain window: the mount is gone, so leaving the item on the
+// account (a ToS leak that B2 would make permanent post-restart) is the worse outcome (B3).
+func TestClose_ForceReleasesPinnedEntry(t *testing.T) {
+	store := newFakeStore()
+	tb := newFakeTorBox()
+	m, err := New(Deps{Store: store, TorBox: tb, Policy: config.Policy{ActiveSlots: 3}})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	m.SetLogger(quietLogger())
+	m.SetDrainTimeout(50 * time.Millisecond) // refs never drain; force after the short window
+
+	store.addRelease(&catalog.Release{Hash: "pin", State: catalog.StateMaterialized, TorBoxID: 55})
+	m.slots <- struct{}{} // the slot this materialization holds
+	m.register("pin", 55)
+	m.mu.Lock()
+	m.track["pin"].refs = 1 // pretend an in-flight reader is pinning it
+	m.mu.Unlock()
+
+	if err := m.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if tb.deleteCount() != 1 {
+		t.Fatalf("Close must force-release the pinned entry (1 ControlDelete), got %d", tb.deleteCount())
+	}
+	if store.state("pin") != catalog.StateVirtual {
+		t.Fatalf("want virtual after force-release, got %q", store.state("pin"))
+	}
+	if m.IsTracked("pin") {
+		t.Fatal("entry must be dropped from track after force-release")
+	}
 }
 
 // TestMountIsHealthy_NilGuard proves the default (no guard installed) always reaps.
