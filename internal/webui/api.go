@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/rushp4000/lazarr/internal/catalog"
+	"github.com/rushp4000/lazarr/internal/materialize"
 )
 
 // releasesResponse is the /api/releases JSON body.
@@ -122,4 +123,47 @@ func (s *handler) handleAuditRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOK(w, map[string]string{"status": "ok"})
+}
+
+// handleRepair serves GET /api/repair — returns the cached evicted list from the catalog.
+func (s *handler) handleRepair(w http.ResponseWriter, r *http.Request) {
+	evicted, err := s.prov.ListEvicted()
+	if err != nil {
+		jsonErr(w, "store error", http.StatusInternalServerError)
+		slog.Warn("webui: list evicted", "err", err)
+		return
+	}
+	if evicted == nil {
+		evicted = []*catalog.Release{}
+	}
+	jsonOK(w, map[string]any{"evicted": evicted, "count": len(evicted)})
+}
+
+// handleRepairScan serves POST /api/repair/scan — triggers a live checkcached sweep.
+func (s *handler) handleRepairScan(w http.ResponseWriter, r *http.Request) {
+	entries, err := s.prov.TriggerRepairScan(r.Context())
+	if err != nil {
+		jsonErr(w, err.Error(), http.StatusInternalServerError)
+		slog.Warn("webui: repair scan", "err", err)
+		return
+	}
+	if entries == nil {
+		entries = []materialize.RepairEntry{}
+	}
+	jsonOK(w, map[string]any{"evicted": entries, "count": len(entries)})
+}
+
+// handleForgetRelease serves POST /api/repair/{hash}/forget — removes from catalog + symlinks.
+func (s *handler) handleForgetRelease(w http.ResponseWriter, r *http.Request) {
+	hash := r.PathValue("hash")
+	if hash == "" {
+		jsonErr(w, "missing hash", http.StatusBadRequest)
+		return
+	}
+	if err := s.prov.ForgetRelease(hash); err != nil {
+		jsonErr(w, err.Error(), http.StatusInternalServerError)
+		slog.Warn("webui: forget release", "hash", hash, "err", err)
+		return
+	}
+	jsonOK(w, map[string]string{"status": "forgotten"})
 }

@@ -1,6 +1,7 @@
 package webui_test
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/rushp4000/lazarr/internal/catalog"
+	"github.com/rushp4000/lazarr/internal/materialize"
 	"github.com/rushp4000/lazarr/internal/metrics"
 	"github.com/rushp4000/lazarr/internal/webui"
 	"github.com/stretchr/testify/assert"
@@ -49,7 +51,12 @@ func (f *fakeProvider) TriggerAudit() error {
 	f.auditCalled = true
 	return f.auditErr
 }
-func (f *fakeProvider) SafeConfig() webui.SafeConfig { return f.cfg }
+func (f *fakeProvider) TriggerRepairScan(_ context.Context) ([]materialize.RepairEntry, error) {
+	return nil, nil
+}
+func (f *fakeProvider) ListEvicted() ([]*catalog.Release, error) { return nil, nil }
+func (f *fakeProvider) ForgetRelease(_ string) error             { return nil }
+func (f *fakeProvider) SafeConfig() webui.SafeConfig             { return f.cfg }
 
 func newHandler(t *testing.T, prov webui.Provider) http.Handler {
 	t.Helper()

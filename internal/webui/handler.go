@@ -47,6 +47,11 @@ func New(prov Provider, username, password string) (http.Handler, error) {
 	// JSON API — mutating (POST).
 	mux.HandleFunc("POST /api/releases/{hash}/release", h.handleForceRelease)
 	mux.HandleFunc("POST /api/audit/run", h.handleAuditRun)
+	mux.HandleFunc("POST /api/repair/scan", h.handleRepairScan)
+	mux.HandleFunc("POST /api/repair/{hash}/forget", h.handleForgetRelease)
+
+	// Repair — read-only.
+	mux.HandleFunc("GET /api/repair", h.handleRepair)
 
 	// Serve the HTML shell for all other paths (SPA-style).
 	mux.HandleFunc("/", h.handleIndex)

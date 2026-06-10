@@ -1,7 +1,10 @@
 package webui
 
 import (
+	"context"
+
 	"github.com/rushp4000/lazarr/internal/catalog"
+	"github.com/rushp4000/lazarr/internal/materialize"
 	"github.com/rushp4000/lazarr/internal/metrics"
 )
 
@@ -23,6 +26,13 @@ type Provider interface {
 	ForceRelease(hash string) error
 	// TriggerAudit runs the ToS audit immediately (engine.AuditTOS). Mutating, POST-only.
 	TriggerAudit() error
+	// TriggerRepairScan runs engine.RepairScan synchronously and returns the evicted set.
+	TriggerRepairScan(ctx context.Context) ([]materialize.RepairEntry, error)
+	// ListEvicted returns releases whose content is no longer available on TorBox's CDN.
+	ListEvicted() ([]*catalog.Release, error)
+	// ForgetRelease removes a release from the catalog and deletes its symlinks so the
+	// arr's health-check will flag it missing and trigger a re-search.
+	ForgetRelease(hash string) error
 	// SafeConfig returns the effective config with api_key and passwords redacted.
 	SafeConfig() SafeConfig
 }

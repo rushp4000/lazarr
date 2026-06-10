@@ -12,6 +12,17 @@ const (
 	StateError        State = "error"        // checkcached/torrentinfo failed, or dead-cache
 )
 
+// CacheStatus reports whether the content is still available on TorBox's CDN.
+// Set by the repair scanner (engine.RepairScan). "evicted" means checkcached returned
+// false — the content is gone and playback would fail with ErrPurged.
+type CacheStatus string
+
+const (
+	CacheStatusUnknown CacheStatus = ""        // not yet checked
+	CacheStatusCached  CacheStatus = "cached"  // confirmed available
+	CacheStatusEvicted CacheStatus = "evicted" // no longer on TorBox CDN
+)
+
 // Release is one grabbed item (one torrent), keyed by infohash.
 type Release struct {
 	Hash       string // infohash
@@ -28,8 +39,10 @@ type Release struct {
 	// (0 when not materialized). The max-hold reaper measures the hold window from
 	// THIS, not AddedOn — a release grabbed long before its first playback must not
 	// be an instant max-hold candidate the moment it materializes (add/delete churn).
-	MaterializedAt int64
-	CreatedAt      int64
+	MaterializedAt  int64
+	CreatedAt       int64
+	CacheStatus     CacheStatus // set by repair scanner; "" = not yet checked
+	LastCacheCheck  int64       // unix; when CacheStatus was last set
 }
 
 // File is one file within a release.
@@ -77,6 +90,15 @@ type Store interface {
 	// MaterializedReleases returns all releases currently in StateMaterialized. Drives the
 	// boot-time reconciliation sweep that releases crash/restart leftovers (B2).
 	MaterializedReleases() ([]*Release, error)
+	// ListAllHashes returns every hash in the catalog. Used by the repair scanner to
+	// batch-check availability with TorBox's checkcached endpoint (no TorBox adds).
+	ListAllHashes() ([]string, error)
+	// SetCacheStatus updates the cache_status and last_cache_check for a release.
+	// Called by engine.RepairScan after each checkcached batch.
+	SetCacheStatus(hash string, status CacheStatus, checkedAt int64) error
+	// ListEvicted returns releases whose CacheStatus is CacheStatusEvicted, newest first.
+	// These are items that are no longer available on TorBox's CDN.
+	ListEvicted() ([]*Release, error)
 	GetLink(hash string, fileID int) (*DLLink, error)
 	SetLink(l *DLLink) error
 	DeleteRelease(hash string) error

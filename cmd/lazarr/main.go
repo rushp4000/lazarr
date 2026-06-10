@@ -20,6 +20,7 @@ import (
 
 	"github.com/rushp4000/lazarr/internal/catalog"
 	"github.com/rushp4000/lazarr/internal/config"
+	"github.com/rushp4000/lazarr/internal/constants"
 	"github.com/rushp4000/lazarr/internal/materialize"
 	"github.com/rushp4000/lazarr/internal/metrics"
 	"github.com/rushp4000/lazarr/internal/qbit"
@@ -162,7 +163,7 @@ func main() {
 	// webui.username + webui.password); otherwise trusted-LAN unauthenticated.
 	var webuiSrv *http.Server
 	if cfg.WebUI.Listen != "" {
-		wp := newWebuiProvider(eng, fsys, store, cfg, cachedAccount, startTime)
+		wp := newWebuiProvider(eng, fsys, store, sym, cfg, cachedAccount, startTime)
 		wh, err := webui.New(wp, cfg.WebUI.Username, cfg.WebUI.Password)
 		if err != nil {
 			slog.Error("webui setup", "err", err)
@@ -195,6 +196,26 @@ func main() {
 			case <-t.C:
 				if err := eng.AuditTOS(); err != nil {
 					slog.Warn("tos audit failed", "err", err)
+				}
+			}
+		}
+	}()
+
+	// Repair-scan loop: daily checkcached sweep over the whole catalog to find content
+	// that TorBox has evicted from its CDN. No TorBox adds; purely read-only. Results
+	// are written to the catalog and visible in the Web UI repair tab.
+	go func() {
+		t := time.NewTicker(constants.DefaultRepairScanEvery)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if evicted, err := eng.RepairScan(ctx); err != nil {
+					slog.Warn("repair scan failed", "err", err)
+				} else if len(evicted) > 0 {
+					slog.Warn("repair scan: evicted content detected", "count", len(evicted))
 				}
 			}
 		}
@@ -261,6 +282,7 @@ type webuiEngine interface {
 	LastAuditUnix() int64
 	Release(hash string) error
 	AuditTOS() error
+	RepairScan(ctx context.Context) ([]materialize.RepairEntry, error)
 	MaterializedSnapshot() []materialize.MaterializedEntry
 }
 
@@ -269,6 +291,7 @@ type webuiProvider struct {
 	eng     webuiEngine
 	fsys    *vfs.FS
 	store   catalog.Store
+	sym     symlink.Manager
 	cfg     *config.Config
 	account *webui.AccountInfo // cached from boot-time UserMe (may be nil)
 	start   time.Time
@@ -278,11 +301,12 @@ func newWebuiProvider(
 	eng webuiEngine,
 	fsys *vfs.FS,
 	store catalog.Store,
+	sym symlink.Manager,
 	cfg *config.Config,
 	acct *torbox.Account,
 	start time.Time,
 ) *webuiProvider {
-	wp := &webuiProvider{eng: eng, fsys: fsys, store: store, cfg: cfg, start: start}
+	wp := &webuiProvider{eng: eng, fsys: fsys, store: store, sym: sym, cfg: cfg, start: start}
 	if acct != nil {
 		wp.account = &webui.AccountInfo{
 			Plan:          acct.Plan,
@@ -334,6 +358,26 @@ func (p *webuiProvider) ForceRelease(hash string) error {
 
 func (p *webuiProvider) TriggerAudit() error {
 	return p.eng.AuditTOS()
+}
+
+func (p *webuiProvider) TriggerRepairScan(ctx context.Context) ([]materialize.RepairEntry, error) {
+	return p.eng.RepairScan(ctx)
+}
+
+func (p *webuiProvider) ListEvicted() ([]*catalog.Release, error) {
+	return p.store.ListEvicted()
+}
+
+// ForgetRelease removes a release from Lazarr entirely — engine release (if materialized),
+// symlinks deleted, catalog entry removed — so the arr's next health-check flags the file
+// missing and triggers a re-search on TorBox / Torrentio.
+func (p *webuiProvider) ForgetRelease(hash string) error {
+	// Best-effort engine release first (no-op if not materialized, returns ErrNotFound).
+	_ = p.eng.Release(hash)
+	if err := p.sym.Remove(hash); err != nil {
+		slog.Warn("webui: forget: remove symlinks", "hash", hash, "err", err)
+	}
+	return p.store.DeleteRelease(hash)
 }
 
 func (p *webuiProvider) SafeConfig() webui.SafeConfig {

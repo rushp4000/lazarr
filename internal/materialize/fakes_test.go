@@ -194,6 +194,35 @@ func (s *fakeStore) DeleteRelease(hash string) error {
 
 func (s *fakeStore) Close() error { return nil }
 
+func (s *fakeStore) ListAllHashes() ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, 0, len(s.releases))
+	for h := range s.releases {
+		out = append(out, h)
+	}
+	return out, nil
+}
+func (s *fakeStore) SetCacheStatus(hash string, status catalog.CacheStatus, _ int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if r, ok := s.releases[hash]; ok {
+		r.CacheStatus = status
+	}
+	return nil
+}
+func (s *fakeStore) ListEvicted() ([]*catalog.Release, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []*catalog.Release
+	for _, r := range s.releases {
+		if r.CacheStatus == catalog.CacheStatusEvicted {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+
 func (s *fakeStore) state(hash string) catalog.State {
 	s.mu.Lock()
 	defer s.mu.Unlock()

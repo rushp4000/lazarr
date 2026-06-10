@@ -101,6 +101,7 @@ button.btn:disabled{opacity:.4;cursor:not-allowed}
   <button onclick="showSection('releases',this)">Releases</button>
   <button onclick="showSection('materialized',this)">Materialized</button>
   <button onclick="showSection('audit',this)">Audit</button>
+  <button onclick="showSection('repair',this)">Repair</button>
   <button onclick="showSection('config',this)">Config</button>
 </nav>
 <main>
@@ -187,6 +188,37 @@ button.btn:disabled{opacity:.4;cursor:not-allowed}
   </div>
 </div>
 
+<!-- REPAIR -->
+<div id="section-repair" class="section">
+  <div class="card">
+    <h2>Content Health / Repair</h2>
+    <p style="font-size:12px;color:#6c7086;margin-bottom:12px">
+      Lazarr checks every catalogued hash against TorBox's <code style="color:#cdd6f4">checkcached</code> endpoint daily
+      (no adds, no charges). Items marked <strong style="color:#f38ba8">evicted</strong> are no longer available on TorBox's CDN —
+      playback would fail with a "purged" error. Use <em>Forget</em> to remove the symlink so your arr's health check
+      flags it missing and triggers a re-search.
+    </p>
+    <div class="filter-row">
+      <button class="btn primary" onclick="runRepairScan()" id="btn-repair-scan">Scan Now</button>
+      <span id="repair-scan-result" style="font-size:12px;margin-left:8px"></span>
+      <span style="flex:1"></span>
+      <button class="btn" onclick="loadRepair()">Refresh</button>
+    </div>
+    <div class="table-wrap">
+      <table id="repair-table">
+        <thead><tr>
+          <th>Hash</th><th>Name</th><th>Category</th><th>State</th>
+          <th>Grabbed</th><th>Last Checked</th><th>Action</th>
+        </tr></thead>
+        <tbody id="repair-body"><tr><td colspan="7" class="loading">Loading…</td></tr></tbody>
+      </table>
+    </div>
+    <div id="repair-empty" style="display:none;color:#a6e3a1;padding:16px 0;font-size:13px">
+      ✓ All catalogued content is available on TorBox CDN.
+    </div>
+  </div>
+</div>
+
 <!-- CONFIG -->
 <div id="section-config" class="section">
   <div class="card">
@@ -222,6 +254,8 @@ function showSection(name, btn) {
     refreshTimer = setInterval(loadMat, 10000);
   } else if (name === 'audit') {
     loadAuditStatus();
+  } else if (name === 'repair') {
+    loadRepair();
   } else if (name === 'config') {
     loadConfig();
   }
@@ -229,17 +263,18 @@ function showSection(name, btn) {
 
 // ─── dashboard ──────────────────────────────────────────────────────────────
 async function refreshDashboard() {
-  const [status, metrics] = await Promise.all([
+  const [status, metrics, repair] = await Promise.all([
     fetchJSON('/api/status'),
     fetchJSON('/api/metrics-summary'),
+    fetchJSON('/api/repair'),
   ]);
-  renderStatusCard(status);
+  renderStatusCard(status, repair);
   renderAccountCard(status);
   renderMetricsCard(metrics);
   renderSlotsCard(status, metrics);
 }
 
-function renderStatusCard(s) {
+function renderStatusCard(s, repair) {
   if (!s) return;
   const mountBadge = s.mounted
     ? '<span class="badge green">● Mounted</span>'
@@ -247,6 +282,10 @@ function renderStatusCard(s) {
   const auditTime = s.last_audit_unix > 0
     ? new Date(s.last_audit_unix * 1000).toLocaleString()
     : 'Never';
+  const evicted = repair ? (repair.count || 0) : 0;
+  const repairBadge = evicted > 0
+    ? `<div><span class="badge red">⚠ ${evicted} evicted</span> <a href="#" onclick="showSection('repair',document.querySelectorAll('nav button')[4]);return false" style="font-size:11px;color:#89b4fa">→ Repair tab</a></div>`
+    : '<div><span class="badge green">✓ Content healthy</span></div>';
   document.getElementById('status-card').innerHTML = `
     <h2>System Health</h2>
     <div style="display:flex;flex-direction:column;gap:8px">
@@ -254,6 +293,7 @@ function renderStatusCard(s) {
       <div><span class="lbl" style="color:#6c7086">Version</span> <span>${esc(s.version||'—')}</span></div>
       <div><span class="lbl" style="color:#6c7086">Uptime</span> <span>${formatDuration(s.uptime_seconds)}</span></div>
       <div><span class="lbl" style="color:#6c7086">Last Audit</span> <span>${auditTime}</span></div>
+      ${repairBadge}
     </div>`;
 }
 
@@ -488,6 +528,84 @@ async function loadAuditStatus() {
   document.getElementById('audit-status').innerHTML = `
     <div style="margin-bottom:10px;font-size:13px;color:#6c7086">Last run: <strong style="color:#cdd6f4">${lastAudit}</strong></div>
     ${leakEl}`;
+}
+
+// ─── repair ──────────────────────────────────────────────────────────────────
+async function loadRepair() {
+  const data = await fetchJSON('/api/repair');
+  const body = document.getElementById('repair-body');
+  const empty = document.getElementById('repair-empty');
+  const table = document.getElementById('repair-table');
+  if (!data) { body.innerHTML = '<tr><td colspan="7" style="color:#f38ba8">Failed to load.</td></tr>'; return; }
+  const items = data.evicted || [];
+  if (items.length === 0) {
+    body.innerHTML = '';
+    table.style.display = 'none';
+    empty.style.display = 'block';
+    return;
+  }
+  table.style.display = '';
+  empty.style.display = 'none';
+  body.innerHTML = items.map(r => {
+    const stBadge = r.state === 'materialized'
+      ? '<span class="badge blue">materialized</span>'
+      : '<span class="badge gray">' + esc(r.state||'virtual') + '</span>';
+    const grabbed = r.added_on > 0 ? relTime(r.added_on) : '—';
+    const checked = r.last_cache_check > 0 ? relTime(r.last_cache_check) : 'Never';
+    return `<tr>
+      <td><span class="hash" title="${esc(r.hash)}">${esc(r.hash.slice(0,12))}…</span></td>
+      <td class="name-cell" title="${esc(r.name)}">${esc(r.name)}</td>
+      <td>${esc(r.category)}</td>
+      <td>${stBadge}</td>
+      <td>${grabbed}</td>
+      <td>${checked}</td>
+      <td><button class="btn danger" onclick="forgetRelease('${esc(r.hash)}',this)">Forget</button></td>
+    </tr>`;
+  }).join('');
+}
+
+async function runRepairScan() {
+  const btn = document.getElementById('btn-repair-scan');
+  const res = document.getElementById('repair-scan-result');
+  btn.disabled = true;
+  btn.textContent = 'Scanning…';
+  res.textContent = '';
+  res.style.color = '';
+  const data = await fetchJSONPost('/api/repair/scan');
+  btn.disabled = false;
+  btn.textContent = 'Scan Now';
+  if (data) {
+    const n = data.count || 0;
+    res.style.color = n > 0 ? '#f38ba8' : '#a6e3a1';
+    res.textContent = n > 0 ? `${n} evicted item(s) found.` : '✓ All content available.';
+    loadRepair();
+  } else {
+    res.style.color = '#f38ba8';
+    res.textContent = 'Scan failed — see daemon logs.';
+  }
+}
+
+async function forgetRelease(hash, btn) {
+  if (!confirm(`Forget ${hash.slice(0,12)}…? This deletes the symlink so your arr will re-search.`)) return;
+  btn.disabled = true;
+  btn.textContent = '…';
+  const ok = await postJSON(`/api/repair/${encodeURIComponent(hash)}/forget`);
+  if (ok) {
+    btn.closest('tr').style.opacity = '0.4';
+    btn.textContent = 'Forgotten';
+    setTimeout(loadRepair, 800);
+  } else {
+    btn.disabled = false;
+    btn.textContent = 'Error';
+  }
+}
+
+async function fetchJSONPost(url) {
+  try {
+    const r = await fetch(url, {method:'POST'});
+    if (!r.ok) return null;
+    return await r.json();
+  } catch { return null; }
 }
 
 // ─── config ──────────────────────────────────────────────────────────────────

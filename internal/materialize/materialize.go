@@ -5,6 +5,8 @@
 package materialize
 
 import (
+	"context"
+
 	"github.com/rushp4000/lazarr/internal/catalog"
 	"github.com/rushp4000/lazarr/internal/config"
 	"github.com/rushp4000/lazarr/internal/torbox"
@@ -27,6 +29,13 @@ type Deps struct {
 	ProbeCacheDir string
 }
 
+// RepairEntry describes a single release whose content is no longer available on TorBox's CDN.
+type RepairEntry struct {
+	Hash     string
+	Name     string
+	Category string
+}
+
 // Engine is the concrete materializer (built by Agent M). It must satisfy
 // vfs.Materializer: ReadAt(hash, fileID, p, off) and Release(hash).
 type Engine interface {
@@ -35,5 +44,9 @@ type Engine interface {
 	// AuditTOS diffs TorBox mylist against our materialized set; logs/alarms leaks.
 	// Scoped to Lazarr-added ids while the account is shared with decypharr (docs/12).
 	AuditTOS() error
+	// RepairScan batch-checks every catalogued hash against TorBox's checkcached endpoint
+	// (no TorBox adds). Marks each release's CacheStatus in the catalog, then returns
+	// the evicted set. Runs daily via the repair ticker in main.
+	RepairScan(ctx context.Context) ([]RepairEntry, error)
 	Close() error
 }
