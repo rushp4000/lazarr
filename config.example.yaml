@@ -1,4 +1,10 @@
 # Lazarr config — copy to config.yaml and fill in. See docs/05 §7 and docs/11.
+# TIP: everything below is editable from the Web UI (Settings tab); the UI rewrites
+# this file (comments are not preserved) and offers a restart. Log-level changes
+# apply live without a restart.
+
+log_level: "info"          # debug | info | warn | error (debug = every request/read)
+
 torbox:
   api_key: "PUT-YOUR-TORBOX-KEY-HERE"        # from your TorBox account
   api_base: "https://api.torbox.app/v1/api"  # verified base (the /v1 matters)

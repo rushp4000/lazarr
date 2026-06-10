@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/rushp4000/lazarr/internal/catalog"
+	"github.com/rushp4000/lazarr/internal/logging"
 	"github.com/rushp4000/lazarr/internal/materialize"
 	"github.com/rushp4000/lazarr/internal/metrics"
 )
@@ -35,4 +36,17 @@ type Provider interface {
 	ForgetRelease(hash string) error
 	// SafeConfig returns the effective config with api_key and passwords redacted.
 	SafeConfig() SafeConfig
+
+	// GetSettings returns the editable configuration for the settings form, with
+	// TorBoxAPIKey and WebUIPassword blanked (the *Set flags report presence).
+	GetSettings() Settings
+	// SaveSettings validates and persists s to config.yaml. Empty secret fields keep
+	// their current values. Log level is applied live; the return reports whether any
+	// other change needs a process restart to take effect.
+	SaveSettings(s Settings) (restartRequired bool, err error)
+	// Logs returns up to limit recent records at or above level, oldest first.
+	Logs(level string, limit int) []logging.Entry
+	// Restart triggers a graceful shutdown shortly after returning, so the container
+	// supervisor (Docker restart policy) brings Lazarr back up on the saved config.
+	Restart() error
 }

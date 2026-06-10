@@ -26,6 +26,13 @@ func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 	return nil
 }
 
+// MarshalYAML renders the duration back as a human string ("168h0m0s"), so a
+// Config round-trips through Save/Load (the Web UI settings editor rewrites the
+// whole file).
+func (d Duration) MarshalYAML() (any, error) {
+	return time.Duration(d).String(), nil
+}
+
 // D returns the underlying time.Duration.
 func (d Duration) D() time.Duration { return time.Duration(d) }
 
@@ -92,6 +99,9 @@ type WebUI struct {
 }
 
 type Config struct {
+	// LogLevel is one of debug|info|warn|error (default info). The Web UI settings
+	// page applies a change live via slog.LevelVar — no restart needed.
+	LogLevel   string    `yaml:"log_level"`
 	TorBox     TorBox    `yaml:"torbox"`
 	QBit       QBit      `yaml:"qbit"`
 	Paths      Paths     `yaml:"paths"`
@@ -190,5 +200,34 @@ func (c *Config) validate() error {
 		return fmt.Errorf("webui.username and webui.password must both be set or both be empty")
 	}
 
+	// (f) log_level must be a recognized name (empty = info).
+	switch c.LogLevel {
+	case "", "debug", "info", "warn", "error":
+	default:
+		return fmt.Errorf("log_level %q must be one of debug|info|warn|error", c.LogLevel)
+	}
+
+	return nil
+}
+
+// Validate exposes the post-load validation for callers that construct or mutate a
+// Config in memory (the Web UI settings editor) before saving it.
+func (c *Config) Validate() error { return c.validate() }
+
+// Save atomically writes c as YAML to path (tmp file + rename, mode 0600 — the file
+// holds the TorBox API key). Callers should Validate() first.
+func Save(path string, c *Config) error {
+	b, err := yaml.Marshal(c)
+	if err != nil {
+		return fmt.Errorf("config: marshal: %w", err)
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		return fmt.Errorf("config: write %s: %w", tmp, err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("config: rename: %w", err)
+	}
 	return nil
 }

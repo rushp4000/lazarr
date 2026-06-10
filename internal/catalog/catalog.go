@@ -24,25 +24,29 @@ const (
 )
 
 // Release is one grabbed item (one torrent), keyed by infohash.
+//
+// JSON tags are the Web UI wire format (/api/releases, /api/repair) — snake_case,
+// matched by the dashboard JS. Magnet is excluded: it is internal plumbing and can
+// be very large (full trackers list) for zero UI value.
 type Release struct {
-	Hash       string // infohash
-	Name       string
-	Category   string // = arr name
-	Magnet     string // original magnet/URL (to add at materialize time)
-	TotalSize  int64
-	State      State
-	Cached     bool  // checkcached hit at grab time?
-	TorBoxID   int64 // set only while materialized
-	AddedOn    int64 // unix; when added to the catalog (grab time)
-	LastAccess int64 // unix; drives the idle reaper
+	Hash       string `json:"hash"` // infohash
+	Name       string `json:"name"`
+	Category   string `json:"category"` // = arr name
+	Magnet     string `json:"-"`        // original magnet/URL (to add at materialize time)
+	TotalSize  int64  `json:"total_size"`
+	State      State  `json:"state"`
+	Cached     bool   `json:"cached"`      // checkcached hit at grab time?
+	TorBoxID   int64  `json:"torbox_id"`   // set only while materialized
+	AddedOn    int64  `json:"added_on"`    // unix; when added to the catalog (grab time)
+	LastAccess int64  `json:"last_access"` // unix; drives the idle reaper
 	// MaterializedAt is the unix time the release last entered StateMaterialized
 	// (0 when not materialized). The max-hold reaper measures the hold window from
 	// THIS, not AddedOn — a release grabbed long before its first playback must not
 	// be an instant max-hold candidate the moment it materializes (add/delete churn).
-	MaterializedAt  int64
-	CreatedAt       int64
-	CacheStatus     CacheStatus // set by repair scanner; "" = not yet checked
-	LastCacheCheck  int64       // unix; when CacheStatus was last set
+	MaterializedAt int64       `json:"materialized_at"`
+	CreatedAt      int64       `json:"created_at"`
+	CacheStatus    CacheStatus `json:"cache_status"`     // set by repair scanner; "" = not yet checked
+	LastCacheCheck int64       `json:"last_cache_check"` // unix; when CacheStatus was last set
 }
 
 // File is one file within a release.

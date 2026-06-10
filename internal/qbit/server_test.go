@@ -88,8 +88,8 @@ func (f *fakeStore) TouchAccess(hash string, ts int64) error {
 	return nil
 }
 
-func (f *fakeStore) IdleCandidates(before int64) ([]*catalog.Release, error)  { return nil, nil }
-func (f *fakeStore) OverMaxHold(before int64) ([]*catalog.Release, error)     { return nil, nil }
+func (f *fakeStore) IdleCandidates(before int64) ([]*catalog.Release, error) { return nil, nil }
+func (f *fakeStore) OverMaxHold(before int64) ([]*catalog.Release, error)    { return nil, nil }
 func (f *fakeStore) ListReleases(_ catalog.ReleaseFilter) ([]*catalog.Release, int, error) {
 	return nil, 0, nil
 }
@@ -105,10 +105,10 @@ func (f *fakeStore) DeleteRelease(hash string) error {
 	return nil
 }
 
-func (f *fakeStore) Close() error                                              { return nil }
-func (f *fakeStore) ListAllHashes() ([]string, error)                         { return nil, nil }
+func (f *fakeStore) Close() error                                                  { return nil }
+func (f *fakeStore) ListAllHashes() ([]string, error)                              { return nil, nil }
 func (f *fakeStore) SetCacheStatus(_ string, _ catalog.CacheStatus, _ int64) error { return nil }
-func (f *fakeStore) ListEvicted() ([]*catalog.Release, error)                  { return nil, nil }
+func (f *fakeStore) ListEvicted() ([]*catalog.Release, error)                      { return nil, nil }
 
 // fakeTorBox implements torbox.Client with canned responses.
 type fakeTorBox struct {

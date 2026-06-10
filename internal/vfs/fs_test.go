@@ -71,15 +71,15 @@ func (s *fakeStore) OverMaxHold(_ int64) ([]*catalog.Release, error)     { retur
 func (s *fakeStore) ListReleases(_ catalog.ReleaseFilter) ([]*catalog.Release, int, error) {
 	return nil, 0, nil
 }
-func (s *fakeStore) MaterializedIDs() ([]int64, error)                   { return nil, nil }
-func (s *fakeStore) MaterializedReleases() ([]*catalog.Release, error)   { return nil, nil }
-func (s *fakeStore) GetLink(_ string, _ int) (*catalog.DLLink, error)    { return nil, nil }
-func (s *fakeStore) SetLink(_ *catalog.DLLink) error                     { return nil }
-func (s *fakeStore) DeleteRelease(_ string) error                             { return nil }
-func (s *fakeStore) Close() error                                             { return nil }
-func (s *fakeStore) ListAllHashes() ([]string, error)                         { return nil, nil }
+func (s *fakeStore) MaterializedIDs() ([]int64, error)                             { return nil, nil }
+func (s *fakeStore) MaterializedReleases() ([]*catalog.Release, error)             { return nil, nil }
+func (s *fakeStore) GetLink(_ string, _ int) (*catalog.DLLink, error)              { return nil, nil }
+func (s *fakeStore) SetLink(_ *catalog.DLLink) error                               { return nil }
+func (s *fakeStore) DeleteRelease(_ string) error                                  { return nil }
+func (s *fakeStore) Close() error                                                  { return nil }
+func (s *fakeStore) ListAllHashes() ([]string, error)                              { return nil, nil }
 func (s *fakeStore) SetCacheStatus(_ string, _ catalog.CacheStatus, _ int64) error { return nil }
-func (s *fakeStore) ListEvicted() ([]*catalog.Release, error)                 { return nil, nil }
+func (s *fakeStore) ListEvicted() ([]*catalog.Release, error)                      { return nil, nil }
 
 // fakeMat implements vfs.Materializer.  ReadAt records every call.  By
 // default it fills dest with a repeated byte value (0xAB) so callers can
@@ -509,4 +509,3 @@ func TestStatDoesNotMaterialize_RaceDetector(t *testing.T) {
 
 	assert.Zero(t, mat.callCount(), "concurrent stats must not trigger the Materializer")
 }
-

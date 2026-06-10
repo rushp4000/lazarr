@@ -88,8 +88,8 @@ type materializer struct {
 	// mu guards the in-memory materialized-set bookkeeping (track + lru). It is never held
 	// across network I/O (slot admission, GET, CreateTorrent) — see admit/lockstep helpers.
 	mu    sync.Mutex
-	track map[string]*entry   // hash -> live materialization state
-	seen  map[int64]struct{}  // torbox ids Lazarr has added this lifetime (audit scope)
+	track map[string]*entry  // hash -> live materialization state
+	seen  map[int64]struct{} // torbox ids Lazarr has added this lifetime (audit scope)
 	// inflight marks hashes whose materialize is currently running (singleflight winner,
 	// between the slot-admit and register-in-track). releaseUntracked (B2) consults it so a
 	// boot-reconcile / reaper sweep never deletes a TorBox item a concurrent first-read is

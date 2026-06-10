@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"strings"
 )
 
 //go:embed assets/templates/index.html
@@ -14,8 +15,8 @@ var assetFS embed.FS
 // handler is the concrete Web UI http.Handler. It holds the provider and the
 // compiled template set.
 type handler struct {
-	prov  Provider
-	tmpl  *template.Template
+	prov Provider
+	tmpl *template.Template
 }
 
 // New returns an http.Handler serving the Lazarr dashboard. Wrap it in an
@@ -43,12 +44,16 @@ func New(prov Provider, username, password string) (http.Handler, error) {
 	mux.HandleFunc("GET /api/materialized", h.handleMaterialized)
 	mux.HandleFunc("GET /api/metrics-summary", h.handleMetricsSummary)
 	mux.HandleFunc("GET /api/config", h.handleConfig)
+	mux.HandleFunc("GET /api/settings", h.handleSettingsGet)
+	mux.HandleFunc("GET /api/logs", h.handleLogs)
 
 	// JSON API — mutating (POST).
 	mux.HandleFunc("POST /api/releases/{hash}/release", h.handleForceRelease)
 	mux.HandleFunc("POST /api/audit/run", h.handleAuditRun)
 	mux.HandleFunc("POST /api/repair/scan", h.handleRepairScan)
 	mux.HandleFunc("POST /api/repair/{hash}/forget", h.handleForgetRelease)
+	mux.HandleFunc("POST /api/settings", h.handleSettingsSave)
+	mux.HandleFunc("POST /api/restart", h.handleRestart)
 
 	// Repair — read-only.
 	mux.HandleFunc("GET /api/repair", h.handleRepair)
@@ -59,8 +64,15 @@ func New(prov Provider, username, password string) (http.Handler, error) {
 	return basicAuth(mux, username, password), nil
 }
 
-// handleIndex serves the single-page HTML shell.
+// handleIndex serves the single-page HTML shell. API paths that did not match a
+// registered method+route must NOT fall through to HTML — a JS fetch would try to
+// parse the shell page as JSON (and a GET of a POST-only mutation would look like
+// it succeeded).
 func (s *handler) handleIndex(w http.ResponseWriter, r *http.Request) {
+	if strings.HasPrefix(r.URL.Path, "/api/") {
+		jsonErr(w, "not found", http.StatusNotFound)
+		return
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := s.tmpl.ExecuteTemplate(w, "index.html", nil); err != nil {
 		slog.Warn("webui: render index", "err", err)
