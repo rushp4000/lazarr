@@ -343,6 +343,14 @@ func (p *proxy) getRange(ctx context.Context, rawURL string, dst []byte, off int
 		if isRefreshStatus(resp.StatusCode) {
 			return 0, nil, torbox.ErrLinkExpired
 		}
+		// 5xx gateway-class answers mean THIS node is unhealthy (observed live:
+		// 502 after a node went sideways) — same recovery as a dead node: refresh
+		// the link so TorBox re-pins a healthy one.
+		if resp.StatusCode == http.StatusBadGateway ||
+			resp.StatusCode == http.StatusServiceUnavailable ||
+			resp.StatusCode == http.StatusGatewayTimeout {
+			return 0, nil, fmt.Errorf("%w: CDN HTTP %d", errCDNUnreachable, resp.StatusCode)
+		}
 		return 0, nil, fmt.Errorf("materialize: CDN HTTP %d", resp.StatusCode)
 	}
 
