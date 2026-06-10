@@ -12,9 +12,9 @@ import (
 	"encoding/json"
 	"net/http"
 
-	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	dto "github.com/prometheus/client_model/go"
 )
 
 // reg is the dedicated registry. We do not use the default registry so Lazarr's

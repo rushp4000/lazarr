@@ -1,5 +1,5 @@
 # Lazarr — example deployment. Copy to docker-compose.yml and adjust paths.
-# Full walkthrough: docs/20-DEPLOYMENT.md
+# Full walkthrough: README.md → Installation.
 #
 # THE ONE THING TO GET RIGHT: the symlink tree + FUSE mount must live on a host
 # path that Sonarr/Radarr AND Plex also mount at the SAME path, and that bind

@@ -34,6 +34,16 @@ const (
 // BEFORE any network request is made.
 var errSSRFBlocked = errors.New("materialize: CDN URL blocked by host-pin/SSRF policy")
 
+// errCDNUnreachable marks a transport-level failure talking to the presigned CDN host
+// (dial refused/timeout, header timeout, mid-body reset). TorBox runs many CDN nodes and
+// a presigned URL pins one of them; when that node dies the URL is useless even though it
+// never 4xxes. Observed live 2026-06-10: nexus-136.snam.tb-cdn.io went down mid-stream and
+// the cached link failed with "connection refused" for minutes. proxyRead treats this the
+// same as ErrLinkExpired: invalidate + RequestDL once (TorBox hands out a different node)
+// + retry once. Context cancellation is NOT classified as this — a viewer stopping
+// playback must not burn a link refresh.
+var errCDNUnreachable = errors.New("materialize: CDN host unreachable")
+
 // proxy issues SSRF-safe ranged GETs to the presigned CDN URL. Security (docs/15 §4.F):
 //   - require https + pin the host to *.tb-cdn.io (plus a configurable allowlist),
 //   - refuse private/loopback/link-local IPs at BOTH the URL-validation stage AND at dial
@@ -191,9 +201,11 @@ func (m *materializer) proxyRead(ctx context.Context, ent *entry, fileID int, p 
 		return n, body, nil
 	}
 
-	// Refresh-on-4xx: invalidate + re-request ONCE, retry ONCE.
-	if errors.Is(err, torbox.ErrLinkExpired) {
-		m.log.Debug("dl_link expired, refreshing once", "hash", short(ent.hash), "file_id", fileID)
+	// Refresh-once: invalidate + re-request ONCE, retry ONCE. Two triggers:
+	//   - 4xx expiry (the #179 fix), and
+	//   - CDN transport failure (dead node; RequestDL re-pins a healthy node).
+	if errors.Is(err, torbox.ErrLinkExpired) || errors.Is(err, errCDNUnreachable) {
+		m.log.Info("dl_link unusable, refreshing once", "hash", short(ent.hash), "file_id", fileID, "cause", err)
 		metrics.IncLinkRefresh()
 		link, rerr := m.freshLink(ctx, ent, fileID, true)
 		if rerr != nil {
@@ -280,7 +292,13 @@ func (p *proxy) getRange(ctx context.Context, rawURL string, dst []byte, off int
 
 	resp, err := p.hc.Do(req)
 	if err != nil {
-		return 0, nil, redactURL(err)
+		// Caller-driven cancellation (viewer stopped reading) passes through untouched;
+		// anything else that failed before we got response headers is a dead/unhealthy CDN
+		// node — mark it refreshable so proxyRead can re-pin via RequestDL.
+		if ctx.Err() != nil {
+			return 0, nil, redactURL(err)
+		}
+		return 0, nil, fmt.Errorf("%w: %s", errCDNUnreachable, redactURL(err))
 	}
 	defer drainClose(resp.Body)
 
@@ -304,10 +322,14 @@ func (p *proxy) getRange(ctx context.Context, rawURL string, dst []byte, off int
 	}
 
 	// Fill exactly the requested window. io.ReadFull tolerates a short final read (EOF) via
-	// ErrUnexpectedEOF, which is fine for the tail of a file.
+	// ErrUnexpectedEOF, which is fine for the tail of a file. A non-EOF mid-body failure
+	// (connection reset by a dying node) is refreshable like a pre-header failure.
 	n, rerr := io.ReadFull(resp.Body, dst)
 	if rerr != nil && !errors.Is(rerr, io.ErrUnexpectedEOF) && !errors.Is(rerr, io.EOF) {
-		return n, nil, redactURL(rerr)
+		if ctx.Err() != nil {
+			return n, nil, redactURL(rerr)
+		}
+		return n, nil, fmt.Errorf("%w: %s", errCDNUnreachable, redactURL(rerr))
 	}
 
 	var body []byte

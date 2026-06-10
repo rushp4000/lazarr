@@ -29,11 +29,12 @@ type Deps struct {
 	ProbeCacheDir string
 }
 
-// RepairEntry describes a single release whose content is no longer available on TorBox's CDN.
+// RepairEntry describes a single release whose content is no longer available on TorBox's
+// CDN. JSON tags are the Web UI wire format (/api/repair/scan), snake_case like the rest.
 type RepairEntry struct {
-	Hash     string
-	Name     string
-	Category string
+	Hash     string `json:"hash"`
+	Name     string `json:"name"`
+	Category string `json:"category"`
 }
 
 // Engine is the concrete materializer (built by Agent M). It must satisfy

@@ -38,7 +38,7 @@ var (
 	DefaultActiveSlots = EssentialActiveSlots
 	// DefaultCloseDrain is how long Close waits for in-flight readers to release their refs
 	// before force-releasing pinned entries on shutdown (B3 — never leak a TorBox item).
-	DefaultCloseDrain        = 5 * time.Second
-	LinkRefreshStatuses      = []int{400, 403, 410} // re-request presigned URL then retry
-	DefaultRepairScanEvery   = 24 * time.Hour        // how often the repair scan runs
+	DefaultCloseDrain      = 5 * time.Second
+	LinkRefreshStatuses    = []int{400, 403, 410} // re-request presigned URL then retry
+	DefaultRepairScanEvery = 24 * time.Hour       // how often the repair scan runs
 )

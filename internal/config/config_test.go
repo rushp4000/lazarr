@@ -165,3 +165,51 @@ func TestLoad_Valid(t *testing.T) {
 		t.Fatalf("active_slots = %d, want 0 (auto-detect)", c.Policy.ActiveSlots)
 	}
 }
+
+// TestSaveLoadRoundTrip guards the Web UI settings editor: a Config written by Save
+// must Load back identical (Duration marshal, log_level, secrets intact, mode 0600).
+func TestSaveLoadRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/config.yaml"
+	c := Default()
+	c.LogLevel = "debug"
+	c.TorBox.APIKey = "k-123"
+	c.Paths.DownloadDir = "/dl"
+	c.Paths.FuseMount = "/fuse"
+	c.Paths.DBPath = "/data/x.sqlite"
+	c.Paths.ProbeCacheDir = "/data/probe"
+	c.Categories = []string{"radarr_hin", "sonarr_hin"}
+	c.Ownership = Ownership{PUID: 1003, PGID: 1003}
+	c.WebUI = WebUI{Listen: ":8082"}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if err := Save(path, c); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if fi.Mode().Perm() != 0o600 {
+		t.Fatalf("config file mode = %v, want 0600 (holds api key)", fi.Mode().Perm())
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got.LogLevel != "debug" || got.TorBox.APIKey != "k-123" ||
+		got.Policy.IdleTTL.D() != c.Policy.IdleTTL.D() ||
+		got.Policy.MaxHold.D() != c.Policy.MaxHold.D() ||
+		len(got.Categories) != 2 || got.Categories[1] != "sonarr_hin" {
+		t.Fatalf("round-trip mismatch: %+v", got)
+	}
+}
+
+func TestValidateLogLevel(t *testing.T) {
+	c := Default()
+	c.LogLevel = "loud"
+	if err := c.Validate(); err == nil {
+		t.Fatalf("expected log_level validation error")
+	}
+}

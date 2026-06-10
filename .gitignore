@@ -20,3 +20,8 @@
 
 # agent worktrees (transient)
 .claude/worktrees/
+
+# internal working notes / project-local agent tooling — not part of the product
+/docs/
+/.claude/
+/scripts/

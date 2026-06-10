@@ -7,13 +7,20 @@
 // using Go html/template. No external build step is required; all assets are embedded
 // in the binary via go:embed.
 //
-// Security: torbox.api_key is never rendered or logged by this package. All mutating
-// endpoints (force-release, audit) accept POST only and respect the auth middleware.
+// Security: torbox.api_key is never rendered or logged by this package — the settings
+// endpoint accepts a new key (write-only) but only ever reports whether one is set.
+// All mutating endpoints (force-release, audit, settings, restart) accept POST only
+// and respect the auth middleware.
 package webui
 
-// MaterializedItem is the web UI view of one live in-memory materialized release.
+// MaterializedItem is the web UI view of one live in-memory materialized release
+// ("active stream" in UI language), joined with its catalog identity so humans see
+// titles, not infohashes.
 type MaterializedItem struct {
 	Hash       string `json:"hash"`
+	Name       string `json:"name"`     // catalog release name ("" if unknown)
+	Category   string `json:"category"` // arr name
+	TotalSize  int64  `json:"total_size"`
 	TorBoxID   int64  `json:"torbox_id"`
 	Refs       int    `json:"refs"`
 	LastUsedNs int64  `json:"last_used_ns"`
@@ -40,6 +47,7 @@ type StatusSnapshot struct {
 }
 
 // SafeConfig is the effective configuration with secrets redacted (api_key, passwords).
+// Kept for the read-only view; the editable form uses Settings.
 type SafeConfig struct {
 	TorBoxAPIBase string   `json:"torbox_api_base"`
 	QBitListen    string   `json:"qbit_listen"`
@@ -57,4 +65,51 @@ type SafeConfig struct {
 	OwnershipPUID int      `json:"ownership_puid"`
 	OwnershipPGID int      `json:"ownership_pgid"`
 	AuthEnabled   bool     `json:"auth_enabled"`
+}
+
+// Settings is the editable configuration exchanged with the settings page.
+//
+// GET /api/settings returns it with TorBoxAPIKey and WebUIPassword ALWAYS empty;
+// the *Set flags tell the form whether a value exists. POST /api/settings accepts
+// the same shape: an empty TorBoxAPIKey / WebUIPassword means "keep the current
+// value" (so the form can save without re-entering secrets).
+type Settings struct {
+	LogLevel string `json:"log_level"` // debug|info|warn|error; applied live on save
+
+	TorBoxAPIKey    string `json:"torbox_api_key,omitempty"` // write-only
+	TorBoxAPIKeySet bool   `json:"torbox_api_key_set"`
+	TorBoxAPIBase   string `json:"torbox_api_base"`
+
+	QBitListen   string `json:"qbit_listen"`
+	QBitUsername string `json:"qbit_username"`
+	QBitPassword string `json:"qbit_password"` // shown: the arr needs it to connect
+
+	Categories []string `json:"categories"` // one per arr instance
+
+	DownloadDir   string `json:"download_dir"`
+	FuseMount     string `json:"fuse_mount"`
+	DBPath        string `json:"db_path"`
+	ProbeCacheDir string `json:"probe_cache_dir"`
+
+	AllowUncached bool   `json:"allow_uncached"`
+	IdleTTL       string `json:"idle_ttl"` // Go duration string, e.g. "168h"
+	MaxHold       string `json:"max_hold"` // Go duration string, e.g. "720h"
+	ActiveSlots   int    `json:"active_slots"`
+	ProbeCache    bool   `json:"probe_cache"`
+
+	PUID int `json:"puid"`
+	PGID int `json:"pgid"`
+
+	MetricsListen string `json:"metrics_listen"`
+
+	WebUIListen      string `json:"webui_listen"`
+	WebUIUsername    string `json:"webui_username"`
+	WebUIPassword    string `json:"webui_password,omitempty"` // write-only
+	WebUIPasswordSet bool   `json:"webui_password_set"`
+}
+
+// SaveResult is the POST /api/settings response.
+type SaveResult struct {
+	Saved           bool `json:"saved"`
+	RestartRequired bool `json:"restart_required"`
 }

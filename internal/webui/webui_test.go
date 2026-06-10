@@ -6,10 +6,12 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/rushp4000/lazarr/internal/catalog"
+	"github.com/rushp4000/lazarr/internal/logging"
 	"github.com/rushp4000/lazarr/internal/materialize"
 	"github.com/rushp4000/lazarr/internal/metrics"
 	"github.com/rushp4000/lazarr/internal/webui"
@@ -19,17 +21,24 @@ import (
 
 // fakeProvider is a test implementation of webui.Provider.
 type fakeProvider struct {
-	status        webui.StatusSnapshot
-	releases      []*catalog.Release
-	relTotal      int
-	matSet        []webui.MaterializedItem
-	summary       *metrics.Summary
-	summaryErr    error
-	releaseErr    error
-	auditErr      error
+	status         webui.StatusSnapshot
+	releases       []*catalog.Release
+	relTotal       int
+	matSet         []webui.MaterializedItem
+	summary        *metrics.Summary
+	summaryErr     error
+	releaseErr     error
+	auditErr       error
 	releasedHashes []string
 	auditCalled    bool
-	cfg           webui.SafeConfig
+	cfg            webui.SafeConfig
+
+	settings      webui.Settings
+	savedSettings *webui.Settings
+	saveRestart   bool
+	saveErr       error
+	logEntries    []logging.Entry
+	restartCalled bool
 }
 
 func (f *fakeProvider) Status() webui.StatusSnapshot { return f.status }
@@ -57,6 +66,19 @@ func (f *fakeProvider) TriggerRepairScan(_ context.Context) ([]materialize.Repai
 func (f *fakeProvider) ListEvicted() ([]*catalog.Release, error) { return nil, nil }
 func (f *fakeProvider) ForgetRelease(_ string) error             { return nil }
 func (f *fakeProvider) SafeConfig() webui.SafeConfig             { return f.cfg }
+func (f *fakeProvider) GetSettings() webui.Settings              { return f.settings }
+func (f *fakeProvider) SaveSettings(s webui.Settings) (bool, error) {
+	if f.saveErr != nil {
+		return false, f.saveErr
+	}
+	f.savedSettings = &s
+	return f.saveRestart, nil
+}
+func (f *fakeProvider) Logs(_ string, _ int) []logging.Entry { return f.logEntries }
+func (f *fakeProvider) Restart() error {
+	f.restartCalled = true
+	return nil
+}
 
 func newHandler(t *testing.T, prov webui.Provider) http.Handler {
 	t.Helper()
@@ -294,4 +316,137 @@ func TestWebUI_DisabledWhenListenEmpty(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
 	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+// ─── /api/settings ────────────────────────────────────────────────────────────
+
+func TestSettingsGet_NeverLeaksSecrets(t *testing.T) {
+	prov := &fakeProvider{settings: webui.Settings{
+		// A misbehaving provider that DOES return secrets — the handler must blank them.
+		TorBoxAPIKey:    "sk-LEAK",
+		TorBoxAPIKeySet: true,
+		WebUIPassword:   "pw-LEAK",
+		QBitUsername:    "lazarr",
+		Categories:      []string{"radarr_hin"},
+		IdleTTL:         "168h0m0s",
+	}}
+	h := newHandler(t, prov)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/api/settings", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	body := rec.Body.String()
+	assert.NotContains(t, body, "LEAK")
+	assert.Contains(t, body, `"torbox_api_key_set":true`)
+	assert.Contains(t, body, "radarr_hin")
+}
+
+func TestSettingsSave_RoundTrip(t *testing.T) {
+	prov := &fakeProvider{saveRestart: true}
+	h := newHandler(t, prov)
+	rec := httptest.NewRecorder()
+	body := `{"log_level":"debug","categories":["radarr_hin","sonarr_hin"],"idle_ttl":"168h","max_hold":"720h"}`
+	req := httptest.NewRequest("POST", "/api/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	h.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NotNil(t, prov.savedSettings)
+	assert.Equal(t, "debug", prov.savedSettings.LogLevel)
+	assert.Equal(t, []string{"radarr_hin", "sonarr_hin"}, prov.savedSettings.Categories)
+	assert.Contains(t, rec.Body.String(), `"restart_required":true`)
+}
+
+func TestSettingsSave_ValidationErrorIs400(t *testing.T) {
+	prov := &fakeProvider{saveErr: errors.New("idle_ttl must be strictly less than max_hold")}
+	h := newHandler(t, prov)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/api/settings", strings.NewReader(`{}`))
+	h.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "idle_ttl")
+}
+
+func TestSettingsSave_BadJSONIs400(t *testing.T) {
+	h := newHandler(t, &fakeProvider{})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/api/settings", strings.NewReader(`{nope`)))
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// ─── /api/logs ────────────────────────────────────────────────────────────────
+
+func TestLogs_Shape(t *testing.T) {
+	prov := &fakeProvider{logEntries: []logging.Entry{
+		{TimeUnixMs: 1781000000000, Level: "INFO", Msg: "materialized", Attrs: "hash=abc"},
+	}}
+	h := newHandler(t, prov)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/api/logs?level=info&limit=50", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), "materialized")
+	assert.Contains(t, rec.Body.String(), `"count":1`)
+}
+
+func TestLogs_EmptyIsArray(t *testing.T) {
+	h := newHandler(t, &fakeProvider{})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/api/logs", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), `"entries":[]`)
+}
+
+// ─── /api/restart ─────────────────────────────────────────────────────────────
+
+func TestRestart_CallsProvider(t *testing.T) {
+	prov := &fakeProvider{}
+	h := newHandler(t, prov)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/api/restart", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.True(t, prov.restartCalled)
+}
+
+func TestRestart_GETNotAllowed(t *testing.T) {
+	prov := &fakeProvider{}
+	h := newHandler(t, prov)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/api/restart", nil))
+	assert.NotEqual(t, http.StatusOK, rec.Code)
+	assert.False(t, prov.restartCalled)
+}
+
+// ─── releases wire format ─────────────────────────────────────────────────────
+
+func TestAPIReleases_SnakeCaseWireFormat(t *testing.T) {
+	// Guards the v1.0.0 bug where catalog.Release had no JSON tags, so the API
+	// emitted PascalCase keys the dashboard JS could not read (names showed empty).
+	prov := &fakeProvider{
+		releases: []*catalog.Release{{
+			Hash: "aabbccddeeff00112233445566778899aabbccdd", Name: "Big Buck Bunny",
+			Category: "radarr_hin", State: catalog.StateMaterialized, TotalSize: 123,
+			Magnet: "magnet:?xt=urn:btih:secret-trackers",
+		}},
+		relTotal: 1,
+	}
+	h := newHandler(t, prov)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/api/releases", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	body := rec.Body.String()
+	for _, key := range []string{`"hash"`, `"name"`, `"category"`, `"state"`, `"total_size"`, `"last_access"`, `"cache_status"`} {
+		assert.Contains(t, body, key)
+	}
+	assert.NotContains(t, body, `"Hash"`)
+	assert.NotContains(t, body, "magnet:?", "magnet must not be exposed on the wire")
+}
+
+func TestAPIMaterialized_IncludesNames(t *testing.T) {
+	prov := &fakeProvider{matSet: []webui.MaterializedItem{{
+		Hash: "aabbcc", Name: "Sintel", Category: "radarr_hin", TotalSize: 99, TorBoxID: 7,
+	}}}
+	h := newHandler(t, prov)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/api/materialized", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), `"name":"Sintel"`)
+	assert.Contains(t, rec.Body.String(), `"category":"radarr_hin"`)
 }

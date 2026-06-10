@@ -10,10 +10,12 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"reflect"
 	"strings"
 	"syscall"
 	"time"
@@ -21,6 +23,7 @@ import (
 	"github.com/rushp4000/lazarr/internal/catalog"
 	"github.com/rushp4000/lazarr/internal/config"
 	"github.com/rushp4000/lazarr/internal/constants"
+	"github.com/rushp4000/lazarr/internal/logging"
 	"github.com/rushp4000/lazarr/internal/materialize"
 	"github.com/rushp4000/lazarr/internal/metrics"
 	"github.com/rushp4000/lazarr/internal/qbit"
@@ -39,17 +42,31 @@ func main() {
 	cfgPath := flag.String("config", "config.yaml", "path to config.yaml")
 	flag.Parse()
 
-	level := slog.LevelInfo
-	if v := os.Getenv("LAZARR_LOG_LEVEL"); strings.EqualFold(v, "debug") {
-		level = slog.LevelDebug
-	}
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
-	slog.SetDefault(logger)
+	// Logger: text to stdout + a bounded in-memory ring for the Web UI Logs tab.
+	// The level is a LevelVar so the settings page can change verbosity live.
+	levelVar := new(slog.LevelVar)
+	levelVar.Set(slog.LevelInfo)
+	logRing := logging.NewRing(logging.RingCapacity)
+	base := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: levelVar})
+	slog.SetDefault(slog.New(logging.NewHandler(base, logRing)))
 
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
 		slog.Error("load config", "path", *cfgPath, "err", err)
 		os.Exit(1)
+	}
+
+	// config log_level first, then the LAZARR_LOG_LEVEL env var as an override
+	// (kept for backwards compatibility with existing deployments).
+	if lv, lerr := logging.ParseLevel(cfg.LogLevel); lerr == nil {
+		levelVar.Set(lv)
+	}
+	if v := os.Getenv("LAZARR_LOG_LEVEL"); v != "" {
+		if lv, lerr := logging.ParseLevel(v); lerr == nil {
+			levelVar.Set(lv)
+		} else {
+			slog.Warn("ignoring invalid LAZARR_LOG_LEVEL", "value", v)
+		}
 	}
 
 	slog.Info("lazarr starting",
@@ -164,6 +181,10 @@ func main() {
 	var webuiSrv *http.Server
 	if cfg.WebUI.Listen != "" {
 		wp := newWebuiProvider(eng, fsys, store, sym, cfg, cachedAccount, startTime)
+		wp.cfgPath = *cfgPath
+		wp.levelVar = levelVar
+		wp.logRing = logRing
+		wp.stop = stop
 		wh, err := webui.New(wp, cfg.WebUI.Username, cfg.WebUI.Password)
 		if err != nil {
 			slog.Error("webui setup", "err", err)
@@ -295,6 +316,12 @@ type webuiProvider struct {
 	cfg     *config.Config
 	account *webui.AccountInfo // cached from boot-time UserMe (may be nil)
 	start   time.Time
+
+	// Settings/observability plumbing (wired by main after construction).
+	cfgPath  string         // path of the loaded config.yaml (settings editor target)
+	levelVar *slog.LevelVar // live log-level control
+	logRing  *logging.Ring  // recent-records buffer for /api/logs
+	stop     func()         // cancels the root signal context (graceful restart)
 }
 
 func newWebuiProvider(
@@ -338,12 +365,19 @@ func (p *webuiProvider) MaterializedSet() []webui.MaterializedItem {
 	snap := p.eng.MaterializedSnapshot()
 	out := make([]webui.MaterializedItem, len(snap))
 	for i, e := range snap {
-		out[i] = webui.MaterializedItem{
+		it := webui.MaterializedItem{
 			Hash:       e.Hash,
 			TorBoxID:   e.TorBoxID,
 			Refs:       e.Refs,
 			LastUsedNs: e.LastUsedNs,
 		}
+		// Join with the catalog so the UI shows the release title, not an infohash.
+		if rel, _, err := p.store.GetRelease(e.Hash); err == nil && rel != nil {
+			it.Name = rel.Name
+			it.Category = rel.Category
+			it.TotalSize = rel.TotalSize
+		}
+		out[i] = it
 	}
 	return out
 }
@@ -378,6 +412,160 @@ func (p *webuiProvider) ForgetRelease(hash string) error {
 		slog.Warn("webui: forget: remove symlinks", "hash", hash, "err", err)
 	}
 	return p.store.DeleteRelease(hash)
+}
+
+// GetSettings maps the running config to the editable settings form. Secrets are
+// blanked; *Set flags report presence so the form can say "configured".
+func (p *webuiProvider) GetSettings() webui.Settings {
+	c := p.cfg
+	return webui.Settings{
+		LogLevel:         effectiveLogLevel(c.LogLevel),
+		TorBoxAPIKeySet:  c.TorBox.APIKey != "",
+		TorBoxAPIBase:    c.TorBox.APIBase,
+		QBitListen:       c.QBit.Listen,
+		QBitUsername:     c.QBit.Username,
+		QBitPassword:     c.QBit.Password,
+		Categories:       append([]string(nil), c.Categories...),
+		DownloadDir:      c.Paths.DownloadDir,
+		FuseMount:        c.Paths.FuseMount,
+		DBPath:           c.Paths.DBPath,
+		ProbeCacheDir:    c.Paths.ProbeCacheDir,
+		AllowUncached:    c.Policy.AllowUncached,
+		IdleTTL:          c.Policy.IdleTTL.D().String(),
+		MaxHold:          c.Policy.MaxHold.D().String(),
+		ActiveSlots:      c.Policy.ActiveSlots,
+		ProbeCache:       c.Policy.ProbeCache,
+		PUID:             c.Ownership.PUID,
+		PGID:             c.Ownership.PGID,
+		MetricsListen:    c.Metrics.Listen,
+		WebUIListen:      c.WebUI.Listen,
+		WebUIUsername:    c.WebUI.Username,
+		WebUIPasswordSet: c.WebUI.Password != "",
+	}
+}
+
+// effectiveLogLevel normalizes "" to "info" for display.
+func effectiveLogLevel(s string) string {
+	if s == "" {
+		return "info"
+	}
+	return s
+}
+
+// SaveSettings overlays s onto the on-disk config, validates, writes the file
+// atomically, hot-applies the log level, and reports whether anything else changed
+// (= restart required). Empty secret fields keep the current values.
+func (p *webuiProvider) SaveSettings(s webui.Settings) (bool, error) {
+	if p.cfgPath == "" {
+		return false, fmt.Errorf("settings editing unavailable: config path unknown")
+	}
+	// Start from the file on disk (source of truth), not the running config — a
+	// previous save that still awaits restart must not be silently reverted.
+	nc, err := config.Load(p.cfgPath)
+	if err != nil {
+		return false, fmt.Errorf("reload current config: %w", err)
+	}
+
+	nc.LogLevel = s.LogLevel
+	if s.TorBoxAPIKey != "" {
+		nc.TorBox.APIKey = s.TorBoxAPIKey
+	}
+	nc.TorBox.APIBase = s.TorBoxAPIBase
+	nc.QBit.Listen = s.QBitListen
+	nc.QBit.Username = s.QBitUsername
+	nc.QBit.Password = s.QBitPassword
+	nc.Categories = normalizeCategories(s.Categories)
+	nc.Paths.DownloadDir = s.DownloadDir
+	nc.Paths.FuseMount = s.FuseMount
+	nc.Paths.DBPath = s.DBPath
+	nc.Paths.ProbeCacheDir = s.ProbeCacheDir
+	nc.Policy.AllowUncached = s.AllowUncached
+	idle, err := time.ParseDuration(s.IdleTTL)
+	if err != nil {
+		return false, fmt.Errorf("keep on TorBox for (idle_ttl) %q: %w", s.IdleTTL, err)
+	}
+	hold, err := time.ParseDuration(s.MaxHold)
+	if err != nil {
+		return false, fmt.Errorf("absolute limit (max_hold) %q: %w", s.MaxHold, err)
+	}
+	nc.Policy.IdleTTL = config.Duration(idle)
+	nc.Policy.MaxHold = config.Duration(hold)
+	nc.Policy.ActiveSlots = s.ActiveSlots
+	nc.Policy.ProbeCache = s.ProbeCache
+	nc.Ownership.PUID = s.PUID
+	nc.Ownership.PGID = s.PGID
+	nc.Metrics.Listen = s.MetricsListen
+	nc.WebUI.Listen = s.WebUIListen
+	nc.WebUI.Username = s.WebUIUsername
+	if s.WebUIPassword != "" {
+		nc.WebUI.Password = s.WebUIPassword
+	}
+	if s.WebUIUsername == "" {
+		nc.WebUI.Password = "" // auth off: clear the orphan password so validate passes
+	}
+
+	if err := nc.Validate(); err != nil {
+		return false, err
+	}
+	if err := config.Save(p.cfgPath, nc); err != nil {
+		return false, err
+	}
+
+	// Hot-apply the log level to the running process.
+	if lv, lerr := logging.ParseLevel(nc.LogLevel); lerr == nil && p.levelVar != nil {
+		p.levelVar.Set(lv)
+	}
+	p.cfg.LogLevel = nc.LogLevel // keep the running view consistent for the next diff
+
+	// Restart needed iff anything besides the log level differs from what is running.
+	runningCmp := *p.cfg
+	newCmp := *nc
+	runningCmp.LogLevel, newCmp.LogLevel = "", ""
+	restart := !reflect.DeepEqual(runningCmp, newCmp)
+	return restart, nil
+}
+
+// normalizeCategories trims whitespace and drops empties/duplicates, preserving order.
+func normalizeCategories(in []string) []string {
+	seen := make(map[string]struct{}, len(in))
+	out := make([]string, 0, len(in))
+	for _, c := range in {
+		c = strings.TrimSpace(c)
+		if c == "" {
+			continue
+		}
+		if _, dup := seen[c]; dup {
+			continue
+		}
+		seen[c] = struct{}{}
+		out = append(out, c)
+	}
+	return out
+}
+
+func (p *webuiProvider) Logs(level string, limit int) []logging.Entry {
+	if p.logRing == nil {
+		return nil
+	}
+	lv, err := logging.ParseLevel(level)
+	if err != nil {
+		lv = slog.LevelDebug // unknown filter -> show everything captured
+	}
+	return p.logRing.Snapshot(lv, limit)
+}
+
+// Restart schedules a graceful shutdown just after the HTTP response flushes. The
+// container's restart policy (restart: unless-stopped) brings Lazarr back up.
+func (p *webuiProvider) Restart() error {
+	if p.stop == nil {
+		return fmt.Errorf("restart unavailable")
+	}
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		slog.Info("webui: restarting (graceful shutdown; supervisor restarts the container)")
+		p.stop()
+	}()
+	return nil
 }
 
 func (p *webuiProvider) SafeConfig() webui.SafeConfig {
