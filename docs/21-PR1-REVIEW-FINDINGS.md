@@ -8,6 +8,35 @@ govulncheck before merge**. Findings below are from code audit.
 
 ---
 
+## ✅ FIX STATUS (2026-06-09, per docs/22 fix plan)
+
+All blockers and should-fixes are FIXED, with tests, on the `webui` branch (the fix work was
+consolidated there alongside the Web UI dashboard; `phase3` is now stale). Full suite re-run
+**green**: `go build/vet/test/-race` across the module + `govulncheck` (0 vulnerabilities
+affecting the code).
+
+| ID | Status | Commit |
+|----|--------|--------|
+| B1 max-hold from materialize time     | ✅ FIXED | `dd52da9` |
+| B2 untracked-release leak + reconcile | ✅ FIXED | `dd52da9` |
+| B3 force-release pinned on Close      | ✅ FIXED | `dd52da9` |
+| S1 SetMountHealthy-before-Start       | ✅ FIXED | `2987a44` |
+| S2 release on qbit delete             | ✅ FIXED | `2987a44` |
+| S3 reaper-skip metric + Healthy timeout | ✅ FIXED | `c8f2a39` |
+| S4 chown no-follow TOCTOU + ancestor bound | ✅ FIXED | `c25df6f` |
+| S5 puid/pgid both-or-neither validation | ✅ FIXED | `906328b` (bundled w/ webui) |
+| S6 RequestDL dead-cache ordering      | ✅ FIXED | `c25df6f` |
+| S7 version-stamped GHCR image         | ✅ FIXED | `08807c9` |
+| S8 example metrics/healthcheck consistency | ✅ FIXED | `08807c9` |
+| N6 pin govulncheck                    | ✅ FIXED | `08807c9` |
+
+Nice-to-haves N1–N5, N7 were NOT attempted in this pass (droppable; see list below).
+
+**Still pending before merge (USER-gated, must not touch the live stack):** the two canary
+re-validations in the Verdict section.
+
+---
+
 ## BLOCKERS (must fix before merge / Phase-4 cutover)
 
 ### B1. `max_hold` is measured from GRAB time, not materialize time → add/delete churn
@@ -147,8 +176,22 @@ healthcheck out by default (or default metrics on in the example pair).
   rslave propagation, and the trusted-LAN trust model (cross-fix S5/S8).
 
 ## Verdict
-**Do not merge yet.** B1+B2(+B3) are ToS-compliance regressions at the heart of the product's
-reason to exist — the audit loop cannot see B2, which is the worst kind of leak. All are small,
-local fixes (one column + one untracked-release path + one Close tweak + a main.go reorder).
-After fixing: re-run build/vet/test/-race/govulncheck, re-run the canary across a daemon
-restart (kill -9, not SIGTERM) and a >24h-old grab, then proceed to STEP C/D of docs/19.
+**Original verdict: do not merge yet.** B1+B2(+B3) are ToS-compliance regressions at the heart
+of the product's reason to exist — the audit loop cannot see B2, which is the worst kind of
+leak. All are small, local fixes (one column + one untracked-release path + one Close tweak +
+a main.go reorder).
+
+**Updated 2026-06-09:** all blockers + should-fixes are FIXED with tests (see the FIX STATUS
+table above); `go build/vet/test/-race` + `govulncheck` re-run **green**. The code blockers
+are cleared.
+
+**Still required before merge — USER-gated, NOT done by the fix pass (must not touch the live
+stack):**
+1. **Boot-reconciliation canary (B2/B3):** restart the canary with `kill -9` (not SIGTERM)
+   *mid-materialize*, then confirm boot reconciliation releases the leftover on next start —
+   verify via mylist with `bypass_cache=true` (the account no longer holds the orphaned id).
+2. **Max-hold-from-materialize canary (B1):** play a release whose grab is >24h old and
+   confirm there is NO mid-playback delete/add churn (the stream is not torn down).
+
+After both canary checks pass, proceed to STEP C/D of docs/19. Branch note: the fixes live on
+`webui`; reconcile/merge the branch strategy (`phase3` vs `webui` vs PR #1) before tagging.
