@@ -1,10 +1,15 @@
 # Lazarr — multi-stage build. Pure-Go (CGO off): modernc.org/sqlite + hanwen/go-fuse.
 FROM golang:1.26-alpine AS build
+# VERSION stamps internal/version.Version so the GHCR image's /health reports the real
+# release (S7). Defaults to "dev" for local builds; the release workflow passes the tag.
+ARG VERSION=dev
 WORKDIR /src
 COPY go.mod go.sum* ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /lazarr ./cmd/lazarr
+RUN CGO_ENABLED=0 go build -trimpath \
+    -ldflags="-s -w -X github.com/rushp4000/lazarr/internal/version.Version=${VERSION}" \
+    -o /lazarr ./cmd/lazarr
 
 FROM alpine:3.20
 RUN apk add --no-cache fuse3 ca-certificates
