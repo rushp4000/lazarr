@@ -344,6 +344,34 @@ button.btn:disabled{opacity:.4;cursor:not-allowed}
       <label>Allow uncached grabs<small>Off (recommended): only grab what TorBox already has cached, so playback is instant. On: also accept releases TorBox must download first.</small></label>
       <div class="field"><input type="checkbox" id="set-uncached"></div>
 
+      <label>If a release isn't cached<small>Only applies when "Allow uncached grabs" is off.</small></label>
+      <div class="field">
+        <select id="set-cachemiss" onchange="toggleWaitRow()">
+          <option value="error">Show as an error in the arr (clean up later)</option>
+          <option value="reject">Skip it — the arr instantly tries another release</option>
+          <option value="wait">Let TorBox download it, if it's quick</option>
+        </select>
+        <div class="row" id="wait-row" style="display:none;margin-top:6px">
+          <span class="hint">only if it can finish within</span>
+          <input type="number" id="set-waitmin" min="1" step="1" style="max-width:90px">
+          <span class="hint">minutes; at most</span>
+          <input type="number" id="set-waitmax" min="1" step="1" style="max-width:70px">
+          <span class="hint">at a time</span>
+        </div>
+        <span class="hint">"Wait" shows a real download bar in the arr; when the download finishes the copy is removed from your account (the content is now in TorBox's cache) and the import completes normally.</span>
+      </div>
+
+      <label>Streaming speed (readahead)<small>How many 1&nbsp;MB pieces to fetch in parallel ahead of playback. Higher = faster streams but more wasted bandwidth when you stop or skip.</small></label>
+      <div class="field">
+        <select id="set-readahead">
+          <option value="0">Off — single connection (~5–8 MB/s, light 1080p)</option>
+          <option value="2">Low — 2 ahead (~10–15 MB/s)</option>
+          <option value="4">Standard — 4 ahead (~20–30 MB/s, most 4K)</option>
+          <option value="6">High — 6 ahead</option>
+          <option value="8">Max — 8 ahead (4K remux)</option>
+        </select>
+      </div>
+
       <label>Header cache<small>Keeps tiny file headers locally so Plex/Jellyfin library scans don’t consume TorBox requests. Leave on.</small></label>
       <div class="field"><input type="checkbox" id="set-probe"></div>
     </div>
@@ -380,7 +408,7 @@ button.btn:disabled{opacity:.4;cursor:not-allowed}
       <div class="field"><div class="row">
         <input type="text" id="set-webui-user" placeholder="username" style="max-width:160px" autocomplete="off">
         <input type="password" id="set-webui-pass" placeholder="" style="max-width:160px" autocomplete="new-password">
-      </div><span class="hint" id="webui-pass-state"></span></div>
+      </div><span class="hint" id="webui-pass-state"></span><span class="hint" id="webui-auth-warn" style="color:#f9e2af"></span></div>
       <label>Metrics port<small>Prometheus /metrics + /health. Empty = disabled.</small></label>
       <div class="field"><input type="text" id="set-metrics-listen"></div>
     </div>
@@ -559,6 +587,7 @@ function titleCell(r) {
 function statusBadge(r) {
   if (r.cache_status === 'evicted') return '<span class="badge red">Unavailable</span>';
   if (r.state === 'materialized') return '<span class="badge blue">On TorBox</span>';
+  if (r.state === 'downloading') return '<span class="badge yellow">TorBox downloading…</span>';
   if (r.state === 'error') return '<span class="badge red">Error</span>';
   return '<span class="badge gray">On demand</span>';
 }
@@ -814,6 +843,11 @@ function toggleFollow() {
 }
 
 // ─── settings ─────────────────────────────────────────────────────────────────
+function toggleWaitRow() {
+  const wait = document.getElementById('set-cachemiss').value === 'wait';
+  document.getElementById('wait-row').style.display = wait ? 'flex' : 'none';
+}
+
 function parseGoDurationToHours(s) {
   // "168h0m0s" / "720h" / "90m" -> hours (float)
   let secs = 0;
@@ -885,6 +919,11 @@ async function loadSettings() {
   document.getElementById('set-slots').value = s.active_slots;
   document.getElementById('set-uncached').checked = !!s.allow_uncached;
   document.getElementById('set-probe').checked = !!s.probe_cache;
+  document.getElementById('set-cachemiss').value = s.on_cache_miss || 'error';
+  document.getElementById('set-waitmin').value = Math.max(1, Math.round(parseGoDurationToHours(s.cache_wait_budget || '15m') * 60));
+  document.getElementById('set-waitmax').value = s.max_wait_downloads || 1;
+  document.getElementById('set-readahead').value = String(s.readahead_windows ?? 4);
+  toggleWaitRow();
   document.getElementById('set-loglevel').value = s.log_level || 'info';
   document.getElementById('set-qbit-listen').value = s.qbit_listen || '';
   document.getElementById('set-qbit-user').value = s.qbit_username || '';
@@ -894,6 +933,8 @@ async function loadSettings() {
   document.getElementById('set-webui-pass').value = '';
   document.getElementById('set-webui-pass').placeholder = s.webui_password_set ? '••••••  (leave blank to keep)' : 'password';
   document.getElementById('webui-pass-state').textContent = '';
+  document.getElementById('webui-auth-warn').textContent = s.webui_username ? '' :
+    '⚠ No login set — anyone on your network can open this page and change settings (including the TorBox key).';
   document.getElementById('set-metrics-listen').value = s.metrics_listen || '';
   document.getElementById('set-dl-dir').value = s.download_dir || '';
   document.getElementById('set-fuse').value = s.fuse_mount || '';
@@ -932,6 +973,10 @@ async function saveSettings() {
     max_hold: getDurationString('set-hold-n', 'set-hold-u'),
     active_slots: parseInt(document.getElementById('set-slots').value, 10) || 0,
     probe_cache: document.getElementById('set-probe').checked,
+    on_cache_miss: document.getElementById('set-cachemiss').value,
+    cache_wait_budget: (parseInt(document.getElementById('set-waitmin').value, 10) || 15) + 'm',
+    max_wait_downloads: parseInt(document.getElementById('set-waitmax').value, 10) || 1,
+    readahead_windows: parseInt(document.getElementById('set-readahead').value, 10) || 0,
     puid: parseInt(document.getElementById('set-puid').value, 10) || 0,
     pgid: parseInt(document.getElementById('set-pgid').value, 10) || 0,
     metrics_listen: document.getElementById('set-metrics-listen').value.trim(),

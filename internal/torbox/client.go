@@ -583,6 +583,10 @@ type torrentDetailRaw struct {
 	Name             string          `json:"name"`
 	Files            []cachedFileRaw `json:"files"`
 	DownloadFinished bool            `json:"download_finished"`
+	DownloadState    string          `json:"download_state"`
+	Progress         float64         `json:"progress"`
+	ETA              int64           `json:"eta"`
+	DownloadSpeed    int64           `json:"download_speed"`
 }
 
 // ----------------------------------------------------------------------------
@@ -613,5 +617,9 @@ func toTorrentDetail(r torrentDetailRaw) TorrentDetail {
 		Name:             r.Name,
 		Files:            files,
 		DownloadFinished: r.DownloadFinished,
+		DownloadState:    r.DownloadState,
+		Progress:         r.Progress,
+		ETA:              r.ETA,
+		DownloadSpeed:    r.DownloadSpeed,
 	}
 }

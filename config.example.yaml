@@ -40,6 +40,23 @@ policy:
   active_slots: 3
   probe_cache: true        # cache file headers so Plex scans of new imports don't re-add
 
+  # What to do when an arr grabs a release TorBox has NOT cached (only applies while
+  # allow_uncached is false):
+  #   error  - keep the grab visible as an error in the arr (default; Cleanuparr-friendly)
+  #   reject - refuse the add so the arr instantly falls back to its next release
+  #   wait   - let TorBox download it: real progress shows in the arr; if TorBox's ETA
+  #            exceeds cache_wait_budget the download is abandoned. On completion the
+  #            account copy is released (content is now cached) and import proceeds.
+  on_cache_miss: "error"
+  cache_wait_budget: "15m"   # wait mode: max acceptable TorBox download ETA
+  max_wait_downloads: 1      # wait mode: concurrent TorBox downloads cap
+
+  # Parallel readahead for playback: how many 1 MiB windows to prefetch ahead of a
+  # sequential read. 0 = off (~5-8 MB/s per stream). 4 suits most 4K (~20-30 MB/s);
+  # 8 for high-bitrate 4K remux. Higher values waste more TorBox bandwidth when a
+  # viewer stops or seeks.
+  readahead_windows: 4
+
 ownership:
   # Lazarr runs as ROOT inside the container (required to mount FUSE in Docker), but the
   # *arr suite runs as its own uid and must be able to move/delete the symlinks Lazarr

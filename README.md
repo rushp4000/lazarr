@@ -17,8 +17,12 @@ clean. No hoarding, no 30-day purges silently breaking your files, no dead 0-byt
 > in production on the author's stack, but expect rough edges. Back up your arr configs
 > before pointing them at anything new.
 >
+> **Open source, no support.** This is published as-is under MIT. There is no support,
+> no SLA, and no roadmap commitments — issues and PRs are welcome but may not get a
+> response. Fork freely.
+>
 > **🤖 This project is 100% AI-developed** (designed, written, reviewed, and tested by
-> Claude, driven by a human operator). Read the code accordingly — issues and PRs welcome.
+> Claude, driven by a human operator). Read the code accordingly.
 
 ---
 
@@ -72,7 +76,11 @@ that detects content TorBox has evicted from cache so your arr can re-search it.
 - **qBittorrent WebUI API emulation** — Sonarr/Radarr connect natively; one category per
   arr instance.
 - **Cached-only by default** — only accepts releases TorBox already has (instant
-  playback); optional `allow_uncached` mode.
+  playback). Configurable cache-miss handling: surface an error, **reject so the arr
+  instantly tries another release**, or **wait** — let TorBox download it with a real
+  progress bar in the arr, bounded by a configurable ETA budget.
+- **Configurable readahead** — parallel window prefetch sized for your bitrate, from
+  light 1080p up to 4K remux.
 - **FUSE virtual drive** — files exist at full size without using disk; reads are
   SSRF-safe range-proxies to TorBox's CDN with automatic link refresh on expiry *and* on
   dead CDN nodes.
@@ -172,6 +180,16 @@ In each Sonarr/Radarr: **Settings → Download Clients → ➕ → qBittorrent**
 The Web UI's Settings page shows this exact table with your live values, and the
 category editor adds new arrs in two clicks.
 
+#### Tested with
+
+| Application | Version | Status |
+|---|---|---|
+| Radarr | v6.1.x | ✅ grab → import → playback, tested in production |
+| Sonarr | v4.0.x | ✅ grab pipeline tested; season packs work via multi-file torrents |
+| Plex | current | ✅ direct play through the FUSE mount |
+| Lidarr / Readarr / Whisparr | — | ❓ untested; the qBittorrent emulation is generic |
+| Jellyfin / Emby | — | ❓ untested; any player that reads files should work |
+
 ### Portainer / GitOps
 
 The compose above works as a Portainer **Stack** (paste or point at a Git repo). Two
@@ -207,10 +225,52 @@ write-only there: it can be replaced but never displayed).
 | `policy.max_hold` | `720h` (30d) | absolute per-item ceiling on TorBox |
 | `policy.active_slots` | `3` | concurrent items on TorBox (match your plan; `0` = auto) |
 | `policy.probe_cache` | `true` | cache file headers so library scans don't cost adds |
+| `policy.on_cache_miss` | `error` | `error` / `reject` (arr retries another release) / `wait` (TorBox downloads it) |
+| `policy.cache_wait_budget` | `15m` | `wait` mode: bail if TorBox's ETA exceeds this |
+| `policy.max_wait_downloads` | `1` | `wait` mode: concurrent TorBox downloads cap |
+| `policy.readahead_windows` | `4` | parallel 1 MiB prefetch depth; 0 = off, 4–8 for 4K |
 | `ownership.puid` / `pgid` | `0` | chown created symlinks to your arr's uid:gid |
 | `metrics.listen` | `:9090` | Prometheus `/metrics` + `/health`; empty = off |
 | `webui.listen` | `:8081` | Web UI; empty = off |
 | `webui.username` / `password` | — | enable HTTP Basic Auth (recommended) |
+
+---
+
+## Security & reverse proxy
+
+- **Set a Web UI login** (Settings → Web UI login, or `webui.username/password`). The
+  dashboard can change every setting including the TorBox key, so on anything but a
+  fully trusted LAN, auth on.
+- The arr-facing qBittorrent port uses the configured username/password; the metrics
+  port is unauthenticated — keep both LAN-only (don't port-forward any of them).
+- **Reverse proxy (optional):** if you want the Web UI reachable from outside, put it
+  behind your proxy with TLS, e.g. Caddy:
+
+  ```
+  lazarr.example.com {
+      reverse_proxy 192.168.1.10:8081
+  }
+  ```
+
+  or nginx:
+
+  ```nginx
+  location / {
+      proxy_pass http://192.168.1.10:8081;
+      proxy_set_header Host $host;
+  }
+  ```
+
+  Only ever expose the Web UI port (8081) — never the qbit (8080) or metrics (9090)
+  ports. Plain HTTP Basic Auth over the internet requires TLS at the proxy.
+
+## Privacy
+
+Lazarr talks to exactly two endpoints: `api.torbox.app` and TorBox's `*.tb-cdn.io`
+content CDN. **No telemetry, no phone-home, no update checks, no analytics.** The Web UI
+is fully embedded in the binary (no external fonts/scripts). See
+[ARCHITECTURE.md](ARCHITECTURE.md) for the full internals and the TorBox-only provider
+constraints.
 
 ---
 

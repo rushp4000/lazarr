@@ -41,6 +41,13 @@ type TorrentDetail struct {
 	Name             string
 	Files            []CachedFile
 	DownloadFinished bool
+	// Download-progress fields (populated while TorBox is fetching an uncached
+	// add; they drive the on_cache_miss=wait mode). Progress is 0..1, ETA in
+	// seconds, DownloadSpeed in bytes/s.
+	DownloadState string
+	Progress      float64
+	ETA           int64
+	DownloadSpeed int64
 }
 
 // Account is the relevant slice of /user/me.

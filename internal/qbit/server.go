@@ -28,13 +28,14 @@ const (
 
 // server is the concrete qBittorrent emulation handler.
 type server struct {
-	deps Deps
-	mux  *http.ServeMux
+	deps  Deps
+	mux   *http.ServeMux
+	waits *waitPool // on_cache_miss=wait live progress (hash -> progress/eta)
 }
 
 // New returns a Server that mounts /api/v2/* on a fresh ServeMux.
 func New(d Deps) Server {
-	s := &server{deps: d}
+	s := &server{deps: d, waits: newWaitPool()}
 	mux := http.NewServeMux()
 
 	// Auth
@@ -310,8 +311,24 @@ func (s *server) handleTorrentsAdd(w http.ResponseWriter, r *http.Request) {
 				rel.State = catalog.StateError
 			}
 		} else {
-			slog.Info("qbit: cache miss, AllowUncached=false → error state", "hash", hash)
-			rel.State = catalog.StateError
+			// Cached-only mode: policy decides the miss behavior.
+			switch s.deps.Config.Policy.OnCacheMiss {
+			case "reject":
+				// Refuse the add: the arr marks this release failed and immediately
+				// falls back to the next candidate. Nothing is stored.
+				slog.Info("qbit: cache miss → rejecting add (on_cache_miss=reject)", "hash", hash, "name", name)
+				writeText(w, "Fails.")
+				return
+			case "wait":
+				if s.startWaitDownload(rel) {
+					break // accepted as StateDownloading
+				}
+				// Could not start (cap reached / createtorrent failed) → error state.
+				rel.State = catalog.StateError
+			default: // "error"
+				slog.Info("qbit: cache miss, cached-only → error state", "hash", hash)
+				rel.State = catalog.StateError
+			}
 		}
 	}
 
@@ -389,15 +406,29 @@ func (s *server) releaseToInfoObj(r *catalog.Release, files []catalog.File) torr
 	state := "pausedUP"
 	progress := 1.0
 	amtLeft := int64(0)
-	if r.State == catalog.StateError {
+	eta := int64(0)
+	completionOn := r.AddedOn // we complete instantly
+
+	switch r.State {
+	case catalog.StateError:
 		state = "error"
 		progress = 0.0
 		amtLeft = r.TotalSize
-	}
-
-	completionOn := r.AddedOn // we complete instantly
-	if r.State == catalog.StateError {
 		completionOn = 0
+	case catalog.StateDownloading:
+		// on_cache_miss=wait: TorBox is fetching the torrent; show its real progress
+		// so the arr renders a live download bar instead of a fake instant-complete.
+		state = "downloading"
+		completionOn = 0
+		var wp waitProgress
+		if s.waits != nil {
+			wp, _ = s.waits.get(r.Hash)
+		}
+		progress = wp.Progress
+		eta = wp.ETA
+		if r.TotalSize > 0 {
+			amtLeft = r.TotalSize - int64(progress*float64(r.TotalSize))
+		}
 	}
 
 	return torrentInfoObj{
@@ -415,7 +446,7 @@ func (s *server) releaseToInfoObj(r *catalog.Release, files []catalog.File) torr
 		AddedOn:      r.AddedOn,
 		DlSpeed:      0,
 		UpSpeed:      0,
-		ETA:          0,
+		ETA:          eta,
 		Ratio:        0,
 		SeqDl:        false,
 		FLPiecePrio:  false,
