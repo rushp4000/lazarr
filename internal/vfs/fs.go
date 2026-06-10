@@ -173,11 +173,30 @@ func (f *FS) Healthy() bool {
 	}
 	// A stat of the mount root reaches the kernel FUSE layer; if the connection is
 	// dead/stale the kernel returns an error (e.g. ENOTCONN) rather than succeeding.
-	if _, err := os.Stat(mount); err != nil {
+	//
+	// But a *wedged* FUSE mount (server goroutine stuck, kernel waiting on a reply) can
+	// make os.Stat block forever. Healthy() is called from the single reaper goroutine and
+	// from /health, so a blocking stat would hang reaping (no idle/max-hold deletes → items
+	// held past 30d, a ToS risk) and the admin endpoint. Run the stat off-goroutine under a
+	// short deadline; a timeout counts as unhealthy. The goroutine leaks only on a truly
+	// wedged stat (it unblocks if/when the mount recovers or is force-unmounted) — an
+	// acceptable, bounded leak versus wedging the daemon's liveness path (S3).
+	done := make(chan error, 1) // buffered so the goroutine never blocks on send after timeout
+	go func() {
+		_, err := os.Stat(mount)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		return err == nil
+	case <-time.After(healthStatTimeout):
 		return false
 	}
-	return true
 }
+
+// healthStatTimeout bounds the mount-root stat in Healthy() so a wedged FUSE mount cannot
+// hang the reaper goroutine or the /health endpoint.
+const healthStatTimeout = 2 * time.Second
 
 // ---------------------------------------------------------------------------
 // FUSE node types

@@ -62,12 +62,17 @@ var (
 		Name: "lazarr_tos_audit_leaks",
 		Help: "Leaked torrents found by the last ToS audit (account holds something believed released).",
 	})
+	reaperSkipped = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "lazarr_reaper_skipped_total",
+		Help: "Reaper sweeps skipped because the FUSE mount was unhealthy (reaping paused; alert if rising).",
+	})
 )
 
 func init() {
 	reg.MustRegister(
 		grabs, materializes, releases, linkRefresh, createRateLimited,
 		probeHits, probeMisses, materializedCount, slotsInUse, tosAuditLeaks,
+		reaperSkipped,
 	)
 }
 
@@ -81,6 +86,7 @@ func IncLinkRefresh()       { linkRefresh.Inc() }
 func IncCreateRateLimited() { createRateLimited.Inc() }
 func IncProbeHit()          { probeHits.Inc() }
 func IncProbeMiss()         { probeMisses.Inc() }
+func IncReaperSkipped()     { reaperSkipped.Inc() }
 
 func SetMaterializedCount(n int) { materializedCount.Set(float64(n)) }
 func SetSlotsInUse(n int)        { slotsInUse.Set(float64(n)) }
@@ -99,6 +105,7 @@ type Summary struct {
 	MaterializedCount      float64 `json:"materialized_count"`
 	SlotsInUse             float64 `json:"slots_in_use"`
 	TosAuditLeaks          float64 `json:"tos_audit_leaks"`
+	ReaperSkippedTotal     float64 `json:"reaper_skipped_total"`
 }
 
 // GatherSummary reads the current counter/gauge values from the Prometheus registry.
@@ -132,6 +139,8 @@ func GatherSummary() (*Summary, error) {
 			s.SlotsInUse = val
 		case "lazarr_tos_audit_leaks":
 			s.TosAuditLeaks = val
+		case "lazarr_reaper_skipped_total":
+			s.ReaperSkippedTotal = val
 		}
 	}
 	return s, nil

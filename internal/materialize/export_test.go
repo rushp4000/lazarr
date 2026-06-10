@@ -3,6 +3,8 @@ package materialize
 import (
 	"net/url"
 	"time"
+
+	"github.com/rushp4000/lazarr/internal/metrics"
 )
 
 // This file exposes a minimal, test-only surface so the white-box tests can:
@@ -73,9 +75,11 @@ func (m *materializer) reapOnce() {
 }
 
 // runReapOnceGuarded runs one reaper cycle through the broken-mount guard exactly as
-// runReapers does per tick: skip both sweeps when the mount is unhealthy, else reap.
+// runReapers does per tick: skip both sweeps (and count the skip) when the mount is
+// unhealthy, else reap.
 func (m *materializer) runReapOnceGuarded() {
 	if !m.mountIsHealthy() {
+		metrics.IncReaperSkipped()
 		return
 	}
 	m.reapOnce()

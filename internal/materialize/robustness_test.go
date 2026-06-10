@@ -7,6 +7,7 @@ import (
 
 	"github.com/rushp4000/lazarr/internal/catalog"
 	"github.com/rushp4000/lazarr/internal/config"
+	"github.com/rushp4000/lazarr/internal/metrics"
 	"github.com/rushp4000/lazarr/internal/torbox"
 )
 
@@ -170,6 +171,25 @@ func TestReapers_SkipWhenMountUnhealthy(t *testing.T) {
 		m.runReapOnceGuarded()
 		if tb.deleteCount() != 1 {
 			t.Fatalf("ControlDelete called %d times while mount healthy; want 1", tb.deleteCount())
+		}
+	})
+
+	// S3: a skipped sweep increments lazarr_reaper_skipped_total so an operator can alert on
+	// "reaping paused" (items held past max-hold while the mount is wedged).
+	t.Run("unhealthy increments skip metric", func(t *testing.T) {
+		before, err := metrics.GatherSummary()
+		if err != nil {
+			t.Fatalf("GatherSummary: %v", err)
+		}
+		m, _, _ := mk(false)
+		m.runReapOnceGuarded()
+		after, err := metrics.GatherSummary()
+		if err != nil {
+			t.Fatalf("GatherSummary: %v", err)
+		}
+		if after.ReaperSkippedTotal != before.ReaperSkippedTotal+1 {
+			t.Fatalf("reaper_skipped_total = %v, want %v (one skip)",
+				after.ReaperSkippedTotal, before.ReaperSkippedTotal+1)
 		}
 	})
 }

@@ -6,6 +6,7 @@ import (
 
 	"github.com/rushp4000/lazarr/internal/catalog"
 	"github.com/rushp4000/lazarr/internal/constants"
+	"github.com/rushp4000/lazarr/internal/metrics"
 )
 
 // runReapers runs the idle + max-hold sweeps on a single ticker until ctx is cancelled.
@@ -25,6 +26,7 @@ func (m *materializer) runReapers(ctx context.Context) {
 			// the whole sweep so we never mass-delete the account on a mount hiccup. The
 			// items stay materialized and are reaped on a later cycle once the mount is back.
 			if !m.mountIsHealthy() {
+				metrics.IncReaperSkipped()
 				m.log.Warn("reaper: skipping sweep — FUSE mount unhealthy (guarding against mass account-delete)")
 				continue
 			}
