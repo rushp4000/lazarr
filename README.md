@@ -117,9 +117,9 @@ services:
     container_name: lazarr
     restart: unless-stopped          # required for the Web UI's Restart button
     ports:
-      - "8080:8080"                  # qBittorrent API (arrs connect here)
-      - "8081:8081"                  # Web UI
-      - "9090:9090"                  # metrics /health (optional)
+      - "8780:8080"                  # qBittorrent API (arrs connect here)
+      - "8781:8081"                  # Web UI
+      - "8782:9090"                  # metrics /health (optional)
     volumes:
       - ./config:/config             # config.yaml + database
       - type: bind                   # shared data root (symlinks + FUSE mount)
@@ -162,7 +162,7 @@ the symlinks resolve, e.g. add to each:
 
 Copy [`config.example.yaml`](config.example.yaml) to `./config/config.yaml`, set
 `torbox.api_key`, and adjust paths if needed. Start the container. From then on,
-**everything is editable in the Web UI** (`http://<host>:8081` → Settings) — it rewrites
+**everything is editable in the Web UI** (`http://<host>:8781` → Settings) — it rewrites
 config.yaml for you and offers a one-click restart.
 
 ### 3. Connect your arrs
@@ -172,7 +172,7 @@ In each Sonarr/Radarr: **Settings → Download Clients → ➕ → qBittorrent**
 | Field    | Value                                          |
 |----------|------------------------------------------------|
 | Host     | your Docker host's IP                          |
-| Port     | `8080` (or your mapping)                       |
+| Port     | `8780` (or your mapping)                       |
 | Username | `lazarr` (config `qbit.username`)              |
 | Password | `lazarr` (config `qbit.password`)              |
 | Category | one unique name per arr, e.g. `radarr`, `sonarr_4k` — must match a `categories:` entry in Lazarr |
@@ -248,7 +248,7 @@ write-only there: it can be replaced but never displayed).
 
   ```
   lazarr.example.com {
-      reverse_proxy 192.168.1.10:8081
+      reverse_proxy 192.168.1.10:8781
   }
   ```
 
@@ -256,12 +256,12 @@ write-only there: it can be replaced but never displayed).
 
   ```nginx
   location / {
-      proxy_pass http://192.168.1.10:8081;
+      proxy_pass http://192.168.1.10:8781;
       proxy_set_header Host $host;
   }
   ```
 
-  Only ever expose the Web UI port (8081) — never the qbit (8080) or metrics (9090)
+  Only ever expose the Web UI port (8781) — never the qbit (8780) or metrics (8782)
   ports. Plain HTTP Basic Auth over the internet requires TLS at the proxy.
 
 ## Privacy
@@ -276,8 +276,8 @@ constraints.
 
 ## Observability
 
-- `GET :9090/health` — JSON: mount health, slots in use, last audit.
-- `GET :9090/metrics` — Prometheus counters (grabs, materializations, releases, link
+- `GET :8782/health` — JSON: mount health, slots in use, last audit.
+- `GET :8782/metrics` — Prometheus counters (grabs, materializations, releases, link
   refreshes, rate limits, **`lazarr_tos_audit_leaks`** — alert if ever non-zero).
 - Web UI → Logs — recent records with level filter; full stream in `docker logs`.
 
