@@ -17,9 +17,22 @@ import (
 	"github.com/rushp4000/lazarr/internal/torbox"
 )
 
-// cdnHostSuffix is the production host-pin: presigned CDN URLs must terminate at a
-// *.tb-cdn.io host (observed: nexus-138.snam.tb-cdn.io). Verified live (docs/08 + docs/11).
-const cdnHostSuffix = ".tb-cdn.io"
+// cdnHostSuffixes is the production host-pin: presigned CDN URLs must terminate at one
+// of TorBox's CDN domains. TorBox serves regional PoPs under *.tb-cdn.io (observed:
+// nexus-138.snam.tb-cdn.io) and the Cloudflare-fronted ERTH PoP under *.tb-cdn.earth
+// (observed: nexus.erth.tb-cdn.earth). Verified live (docs/08 + docs/11 + docs/25).
+var cdnHostSuffixes = []string{".tb-cdn.io", ".tb-cdn.earth"}
+
+// hostPinned reports whether host terminates at one of the allowed TorBox CDN domains,
+// requiring a real label boundary (so "evil.com.tb-cdn.io.attacker.net" is rejected).
+func hostPinned(host string) bool {
+	for _, s := range cdnHostSuffixes {
+		if host == strings.TrimPrefix(s, ".") || strings.HasSuffix(host, s) {
+			return true
+		}
+	}
+	return false
+}
 
 // proxyTimeouts: a single header-region / range read is small (one window), so
 // generous-but-bounded timeouts suffice and protect against slowloris-style stalls.
@@ -168,13 +181,13 @@ func (p *proxy) validateURL(u *url.URL) error {
 		if !p.ipAllowed(ip) {
 			return fmt.Errorf("%w: literal private/loopback IP %s", errSSRFBlocked, ip)
 		}
-		// A public literal IP still isn't a pinned tb-cdn.io host -> reject.
-		return fmt.Errorf("%w: literal IP host %s not pinned to %s", errSSRFBlocked, ip, cdnHostSuffix)
+		// A public literal IP still isn't a pinned TorBox CDN host -> reject.
+		return fmt.Errorf("%w: literal IP host %s not pinned to %v", errSSRFBlocked, ip, cdnHostSuffixes)
 	}
-	// Host-suffix pin. Guard against a "evil.com.tb-cdn.io.attacker" trick by requiring the
-	// suffix to be a real label boundary (host ends with ".tb-cdn.io").
-	if host != strings.TrimPrefix(cdnHostSuffix, ".") && !strings.HasSuffix(host, cdnHostSuffix) {
-		return fmt.Errorf("%w: host %q not under %s", errSSRFBlocked, host, cdnHostSuffix)
+	// Host-suffix pin against the allowed TorBox CDN domains (real label boundary enforced
+	// inside hostPinned).
+	if !hostPinned(host) {
+		return fmt.Errorf("%w: host %q not under %v", errSSRFBlocked, host, cdnHostSuffixes)
 	}
 	return nil
 }
