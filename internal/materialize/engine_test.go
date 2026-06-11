@@ -308,7 +308,9 @@ func TestReadAt_NotCachedUncachedDisabled(t *testing.T) {
 // --- dl_link cache + refresh-on-4xx (exactly one re-RequestDL + one retry) ---------------
 
 func TestReadAt_RefreshOn4xx(t *testing.T) {
-	for _, status := range []int{400, 403, 410} {
+	// 404 is included: after an idle release + re-add the old presigned link 404s, and the
+	// read must refresh (re-RequestDL) rather than fail terminally.
+	for _, status := range []int{400, 403, 404, 410} {
 		t.Run(fmt.Sprintf("status-%d", status), func(t *testing.T) {
 			content := bytes.Repeat([]byte{9}, 16<<10)
 			m, store, tb, cdn := engineWithCDN(t, content, 3, "")

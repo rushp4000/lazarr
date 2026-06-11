@@ -353,7 +353,14 @@ func (p *proxy) getRange(ctx context.Context, rawURL string, dst []byte, off int
 		if resp.StatusCode == http.StatusTooManyRequests {
 			return 0, nil, errCDNThrottled
 		}
-		if isRefreshStatus(resp.StatusCode) {
+		// A presigned-link 4xx (400/403/410) OR a 404 means the link is stale — most often
+		// because the TorBox copy it referenced was released and re-added with a new presigned
+		// path (exactly what happens after an idle release, then a re-watch). Treat it as
+		// refreshable: proxyRead re-requests the link ONCE via RequestDL and retries. A genuinely
+		// purged torrent will 404 again on the fresh link and surface terminally (refresh-once
+		// does not loop). 404 is handled here, in the CDN read path only — the torbox API client
+		// still maps a materialize-time 404 to ErrNotFound (dead cache), which is correct there.
+		if isRefreshStatus(resp.StatusCode) || resp.StatusCode == http.StatusNotFound {
 			return 0, nil, torbox.ErrLinkExpired
 		}
 		// 5xx gateway-class answers mean THIS node is unhealthy (observed live:
