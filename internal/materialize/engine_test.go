@@ -595,6 +595,10 @@ func TestHostPin_RejectsBeforeGET(t *testing.T) {
 	if err := m.ValidateURLForTest("https://nexus-138.snam.tb-cdn.io/dl/x?token=abc"); err != nil {
 		t.Errorf("legitimate tb-cdn URL rejected: %v", err)
 	}
+	// The Cloudflare ERTH PoP serves under *.tb-cdn.earth (verified live) and must also pass.
+	if err := m.ValidateURLForTest("https://nexus.erth.tb-cdn.earth/dld/x?token=abc"); err != nil {
+		t.Errorf("legitimate tb-cdn.earth (ERTH) URL rejected: %v", err)
+	}
 
 	// And critically: a ReadAt against a private URL must error WITHOUT the CDN ever being
 	// hit. We point RequestDL at a private URL and assert no panic / clean error.
