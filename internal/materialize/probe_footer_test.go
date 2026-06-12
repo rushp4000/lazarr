@@ -103,6 +103,42 @@ func TestReadAt_FooterCachedAndServedAfterRelease(t *testing.T) {
 	}
 }
 
+// TestReadAt_HeaderStormCoalescedToOneGET guards the v1.1.5 fix for the live Mercy 429
+// storm (2026-06-12): Plex streams the first MiBs in ~32-64 KiB windows that bypass the
+// prefetcher; on v1.1.4 each became its own CDN GET (100+ per playback start) and
+// Cloudflare's rate limiter tripped and STAYED tripped. The first header-region read must
+// fetch the WHOLE region in ONE ranged GET; every subsequent header read — any offset,
+// not just 0 — is served from the probe cache with zero further CDN traffic.
+func TestReadAt_HeaderStormCoalescedToOneGET(t *testing.T) {
+	content := make([]byte, 6<<20)
+	for i := range content {
+		content[i] = byte((i * 13) % 239)
+	}
+	m, store, tb, cdn := engineWithCDN(t, content, 2, t.TempDir())
+	newReleaseWithFile(store, "h", int64(len(content)))
+
+	// Simulate Plex's playback-start scatter: 32 KiB windows marching through the first
+	// 2 MiB, plus a couple of mid-header seeks.
+	p := make([]byte, 32<<10)
+	offsets := []int64{0, 32 << 10, 64 << 10, 1 << 20, (1 << 20) + (32 << 10), 2 << 20, 2967347, 3596314}
+	for _, off := range offsets {
+		n, err := m.ReadAt("h", 0, p, off)
+		if err != nil {
+			t.Fatalf("header read at %d: %v", off, err)
+		}
+		if !bytes.Equal(p[:n], content[off:off+int64(n)]) {
+			t.Fatalf("bytes mismatch at offset %d", off)
+		}
+	}
+
+	if got := cdn.totalHits(); got != 1 {
+		t.Fatalf("header scatter must coalesce to exactly 1 CDN GET, got %d", got)
+	}
+	if got := tb.createCount(); got != 1 {
+		t.Fatalf("expected exactly 1 add, got %d", got)
+	}
+}
+
 // TestFooterRegionFor covers the clamp behavior.
 func TestFooterRegionFor(t *testing.T) {
 	cases := []struct {

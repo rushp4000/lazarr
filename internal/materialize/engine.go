@@ -398,10 +398,19 @@ func (m *materializer) ReadAt(hash string, fileID int, p []byte, off int64) (int
 	// 5. Record access for the idle reaper (every read).
 	_ = m.store.TouchAccess(hash, m.now().Unix())
 
-	// Footer-region miss: fetch the WHOLE tail region in one GET, cache it, and serve the
-	// requested window from it. One bounded fetch (1-8 MiB) replaces the scatter of small
-	// tail reads every player/scanner makes for MKV cues / MP4 moov — and after release,
-	// future scans never re-materialize. Any failure falls through to the plain window path.
+	// Probe-region miss: fetch the WHOLE region in one GET, cache it, and serve the
+	// requested window from it. One bounded fetch per region replaces the scatter of tiny
+	// reads players/scanners make — header: Plex streams the first MiBs in ~32-64 KiB
+	// windows that bypass the prefetcher, which on v1.1.4 meant 100+ serial CDN GETs per
+	// playback start and a SUSTAINED Cloudflare 429 (observed live, Mercy 2026-06-12:
+	// 101 throttles in ~3 min — the patient ladder can't outlast a storm we generate
+	// ourselves); footer: MKV cues / MP4 moov tail reads. After release, future scans of
+	// either region never re-materialize. Any failure falls through to the window paths.
+	if m.probe != nil && m.probe.covers(off, int64(len(p))) {
+		if n, ok := m.fillHeader(ctx, ent, fileID, fileSize, p, off); ok {
+			return n, nil
+		}
+	}
 	if m.probe != nil && m.probe.coversFooter(fileSize, off, int64(len(p))) {
 		if n, ok := m.fillFooter(ctx, ent, fileID, fileSize, p, off); ok {
 			return n, nil
@@ -423,7 +432,9 @@ func (m *materializer) ReadAt(hash string, fileID int, p []byte, off int64) (int
 	}
 
 	// 3+4. Resolve a fresh link and range-proxy the window (with one refresh-on-4xx retry).
-	n, body, err := m.proxyRead(ctx, ent, fileID, p, off)
+	// (Header-cache population happens in fillHeader above, never here — a partial
+	// off==0 store would permanently block the full-region entry.)
+	n, _, err := m.proxyRead(ctx, ent, fileID, p, off)
 	if err != nil {
 		// Dead-cache at stream time: TorBox purged a release we believed materialized
 		// (requestdl returns not-found, NOT a recoverable stale-link 4xx). Tear the entry
@@ -434,31 +445,65 @@ func (m *materializer) ReadAt(hash string, fileID int, p []byte, off int64) (int
 		return n, err
 	}
 
-	// Populate the probe cache from the header region on first sight (best-effort).
-	if m.probe != nil && body != nil && m.probe.covers(off, int64(len(p))) {
-		m.probe.maybeStore(hash, fileID, off, body)
-	}
 	return n, nil
 }
 
-// fillFooter fetches the file's entire footer region in one ranged GET, stores it in the
-// probe cache, and serves the requested window [off, off+len(p)) from the fetched bytes.
-// Returns ok=false on any failure so the caller falls through to the normal read path —
-// this is an optimization layer, never a correctness gate.
+// fillHeader fetches the file's ENTIRE header region [0, region) in one ranged GET,
+// stores it in the probe cache, and serves the requested window from the fetched bytes.
+// Singleflight-deduped per (hash,fileID) so Plex's parallel scan threads cost one GET,
+// not one each. Returns ok=false on any failure so the caller falls through to the
+// normal read path — this is an optimization layer, never a correctness gate.
+func (m *materializer) fillHeader(ctx context.Context, ent *entry, fileID int, fileSize int64, p []byte, off int64) (int, bool) {
+	region := m.probe.region
+	if fileSize > 0 && fileSize < region {
+		region = fileSize
+	}
+	v, err, _ := m.sf.Do(fmt.Sprintf("hdrfill:%s:%d", ent.hash, fileID), func() (any, error) {
+		buf := make([]byte, region)
+		n, _, err := m.proxyRead(ctx, ent, fileID, buf, 0)
+		if err != nil || n == 0 {
+			return nil, fmt.Errorf("materialize: header region fill: %w", err)
+		}
+		m.probe.maybeStore(ent.hash, fileID, 0, buf[:n])
+		return buf[:n], nil
+	})
+	if err != nil {
+		return 0, false
+	}
+	buf := v.([]byte)
+	if off >= int64(len(buf)) || off+int64(len(p)) > int64(len(buf)) {
+		// Window not fully inside the fetched region (short region fetch / EOF inside
+		// the window): the plain path serves it with correct short-read semantics.
+		return 0, false
+	}
+	return copy(p, buf[off:off+int64(len(p))]), true
+}
+
+// fillFooter is fillHeader's tail-region twin: one ranged GET for the whole footer
+// region, cached, window served from the fetched bytes. Same singleflight + fall-through
+// contract.
 func (m *materializer) fillFooter(ctx context.Context, ent *entry, fileID int, fileSize int64, p []byte, off int64) (int, bool) {
 	region := footerRegionFor(fileSize)
 	start := fileSize - region
-	buf := make([]byte, region)
 
-	n, _, err := m.proxyRead(ctx, ent, fileID, buf, start)
-	if err != nil || int64(n) < off-start+int64(len(p)) {
-		// Short/failed region fetch (size drift near EOF, transient CDN error): let the
-		// plain window path handle the read (and its own error semantics).
+	v, err, _ := m.sf.Do(fmt.Sprintf("ftrfill:%s:%d", ent.hash, fileID), func() (any, error) {
+		buf := make([]byte, region)
+		n, _, err := m.proxyRead(ctx, ent, fileID, buf, start)
+		if err != nil || n == 0 {
+			return nil, fmt.Errorf("materialize: footer region fill: %w", err)
+		}
+		m.probe.storeFooter(ent.hash, fileID, start, buf[:n])
+		return buf[:n], nil
+	})
+	if err != nil {
 		return 0, false
 	}
-	m.probe.storeFooter(ent.hash, fileID, start, buf[:n])
-	copied := copy(p, buf[off-start:n])
-	return copied, true
+	buf := v.([]byte)
+	if off-start < 0 || off-start+int64(len(p)) > int64(len(buf)) {
+		// Short region fetch (size drift near EOF): plain window path handles it.
+		return 0, false
+	}
+	return copy(p, buf[off-start:off-start+int64(len(p))]), true
 }
 
 // ensureMaterialized guarantees the release identified by hash is added to TorBox and
