@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/signal"
 	"reflect"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -40,7 +41,19 @@ const auditInterval = 5 * time.Minute
 
 func main() {
 	cfgPath := flag.String("config", "config.yaml", "path to config.yaml")
+	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println("lazarr " + version.Version)
+		return
+	}
+
+	// Startup banner (printed before the structured logger is installed) so the running
+	// build is unmistakable in `docker logs` — like decypharr's boot banner. Operators
+	// kept mistaking a stale image for a new one (the stack sat on an old tag through
+	// three incidents), so the version is the first line every process prints.
+	printBanner()
 
 	// Logger: text to stdout + a bounded in-memory ring for the Web UI Logs tab.
 	// The level is a LevelVar so the settings page can change verbosity live.
@@ -70,6 +83,7 @@ func main() {
 	}
 
 	slog.Info("lazarr starting",
+		"version", version.Version,
 		"qbit", cfg.QBit.Listen, "fuse", cfg.Paths.FuseMount,
 		"download_dir", cfg.Paths.DownloadDir, "db", cfg.Paths.DBPath,
 		"slots", cfg.Policy.ActiveSlots, "uncached", cfg.Policy.AllowUncached,
@@ -283,6 +297,19 @@ type engStats interface {
 	SlotsInUse() int
 	SlotsTotal() int
 	LastAuditUnix() int64
+}
+
+// printBanner writes the boot banner (version + runtime) to stdout before the structured
+// logger is installed, so the running build is the first thing `docker logs` shows.
+func printBanner() {
+	fmt.Printf(""+
+		"  _                                \n"+
+		" | |    __ _ ____ _ _ __ _ __ \n"+
+		" | |   / _` |_  / _` | '__| '__|\n"+
+		" | |__| (_| |/ / (_| | |  | |   \n"+
+		" |_____\\__,_/___\\__,_|_|  |_|   \n"+
+		"  lazy-materialize TorBox shim   %s (%s/%s)\n\n",
+		version.Version, runtime.GOOS, runtime.GOARCH)
 }
 
 // healthProvider adapts the engine + FUSE mount to metrics.HealthProvider for /health.
