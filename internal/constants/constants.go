@@ -47,4 +47,12 @@ var (
 	// call: hot retries burn the 60/hr createtorrent budget without changing the
 	// outcome, and arr import loops retry every ~60s otherwise.
 	QueuedDeferral = 10 * time.Minute
+	// RateLimitBackoff is the GLOBAL (account-wide) createtorrent pause after TorBox
+	// answers "60 per 1 hour". The limit is a sliding hourly window, so a single stuck
+	// item read every ~60s by an arr import loop otherwise issues ~120 createtorrent
+	// calls/hour against a 60/hour budget — every one a guaranteed 429. While the
+	// backoff is active EVERY materialize fast-fails with NO TorBox call, capping the
+	// account to ~6 probe calls/hour until the window clears. Shorter than the full
+	// hour so a transient spike recovers quickly once real headroom returns.
+	RateLimitBackoff = 10 * time.Minute
 )

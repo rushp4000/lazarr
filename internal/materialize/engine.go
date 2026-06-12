@@ -93,6 +93,15 @@ type materializer struct {
 	// whenever the CDN answers 429; read by prefetchAsync. Atomic: many readers/writers.
 	throttledUntil atomic.Int64
 
+	// rateLimitedUntil (unix nanos) is the GLOBAL createtorrent backoff. TorBox's
+	// "60 per 1 hour" limit is account-wide, not per-hash, so a single stuck item an
+	// arr import loop reads every ~60s would otherwise burn the whole hourly budget
+	// (every call a guaranteed 429). When createtorrent answers ErrRateLimited the
+	// engine sets this to now+RateLimitBackoff; while now() is before it, materialize
+	// fast-fails with NO TorBox call. Atomic: written in the createtorrent error path,
+	// read at the top of every materialize.
+	rateLimitedUntil atomic.Int64
+
 	// sf dedupes concurrent first-materialize per hash so exactly one CreateTorrent runs.
 	sf singleflight.Group
 
@@ -597,12 +606,33 @@ func (m *materializer) materialize(ctx context.Context, hash string) (*entry, er
 	}
 	m.mu.Unlock()
 
+	// Global createtorrent backoff: a recent attempt (any hash) hit TorBox's account-wide
+	// "60 per 1 hour" limit. Re-POSTing is a guaranteed 429 until the window clears, so fail
+	// fast with NO TorBox call — this is what caps a stuck-item read storm from burning the
+	// whole hourly budget (Fire 1). Adoption of an already-materialized item below is exempt
+	// (it does not call createtorrent), so we gate only the create path.
+	if until := m.rateLimitedUntil.Load(); until != 0 && m.now().UnixNano() < until {
+		return nil, fmt.Errorf("materialize: %s createtorrent backoff until %s: %w",
+			short(hash), time.Unix(0, until).UTC().Format(time.RFC3339), torbox.ErrRateLimited)
+	}
+
 	rel, _, err := m.store.GetRelease(hash)
 	if err != nil {
 		return nil, fmt.Errorf("materialize: get release %s: %w", short(hash), err)
 	}
 	if rel == nil {
 		return nil, fmt.Errorf("materialize: unknown release %s", short(hash))
+	}
+
+	// Fast-fail a previously-errored release: an earlier attempt found it not cached or
+	// purged (StateError is terminal until the arr re-grabs, which resets the row to
+	// virtual). Re-calling createtorrent would re-burn the 60/hr budget on an answer that
+	// cannot change. Surface ErrPurged so the read fails clearly and the qbit layer keeps
+	// reporting the torrent in the "error" state — the arr removes it instead of looping
+	// reads forever (Fire 1).
+	if rel.State == catalog.StateError {
+		return nil, fmt.Errorf("materialize: %s previously errored (not cached/purged): %w",
+			short(hash), ErrPurged)
 	}
 
 	// If the catalog already says materialized (e.g. recovered from a prior run), adopt the
@@ -625,8 +655,14 @@ func (m *materializer) materialize(ctx context.Context, hash string) (*entry, er
 		m.releaseSlot()
 		switch {
 		case errors.Is(err, torbox.ErrRateLimited):
-			// Do NOT spin/retry — surface a clear, wrapped error for the caller to back off.
+			// Account-wide "60 per 1 hour" hit. Arm the GLOBAL backoff so every subsequent
+			// materialize (any hash) fast-fails with NO TorBox call until the window clears —
+			// without this, an arr import loop re-reading one stuck item burns the whole
+			// hourly budget (Fire 1). Do NOT spin/retry; surface a clear, wrapped error.
+			m.rateLimitedUntil.Store(m.now().Add(constants.RateLimitBackoff).UnixNano())
 			metrics.IncCreateRateLimited()
+			m.log.Warn("materialize: createtorrent rate limited, global backoff armed",
+				"hash", short(hash), "backoff", constants.RateLimitBackoff)
 			return nil, fmt.Errorf("materialize: createtorrent rate limited for %s: %w", short(hash), err)
 		case errors.Is(err, torbox.ErrAlreadyQueued):
 			// Parked in TorBox's server-side queue (account cooldown / slots full). Not
