@@ -107,6 +107,12 @@ type materializer struct {
 	// in the middle of creating/adopting.
 	inflight map[string]struct{}
 
+	// deferred maps a hash to a retry deadline (unix nanos) after TorBox answered
+	// createtorrent with "Download already queued." (server-side queue: account
+	// cooldown / slots full). Reads before the deadline fail fast with NO TorBox call;
+	// after it, the next read retries and adopts the live torrent if TorBox started it.
+	deferred map[string]int64
+
 	// drainTimeout is how long Close waits for in-flight readers to drop their refs before
 	// force-releasing pinned entries (B3). Wall-clock; overridable in tests.
 	drainTimeout time.Duration
@@ -150,6 +156,7 @@ func New(d Deps) (*materializer, error) {
 		track:        make(map[string]*entry),
 		seen:         make(map[int64]struct{}),
 		inflight:     make(map[string]struct{}),
+		deferred:     make(map[string]int64),
 		drainTimeout: constants.DefaultCloseDrain,
 		prox:         newProxy(d.ExtraCDNHosts),
 	}
@@ -575,6 +582,21 @@ func (m *materializer) ensureMaterialized(ctx context.Context, hash string) (*en
 // on TorBox, persists the state, and registers the in-memory entry. Runs under
 // singleflight so it executes at most once per hash concurrently.
 func (m *materializer) materialize(ctx context.Context, hash string) (*entry, error) {
+	// Deferral gate: a previous attempt learned TorBox parked this hash in its
+	// server-side queue (cooldown / slots full). Until the deadline passes, fail fast
+	// with NO TorBox call — re-POSTing createtorrent burns the 60/hr budget and the
+	// answer cannot change until TorBox starts the queued download.
+	m.mu.Lock()
+	if deadline, ok := m.deferred[hash]; ok {
+		if m.now().UnixNano() < deadline {
+			m.mu.Unlock()
+			return nil, fmt.Errorf("materialize: %s queued upstream, retry after %s: %w",
+				short(hash), time.Unix(0, deadline).UTC().Format(time.RFC3339), torbox.ErrAlreadyQueued)
+		}
+		delete(m.deferred, hash)
+	}
+	m.mu.Unlock()
+
 	rel, _, err := m.store.GetRelease(hash)
 	if err != nil {
 		return nil, fmt.Errorf("materialize: get release %s: %w", short(hash), err)
@@ -606,6 +628,17 @@ func (m *materializer) materialize(ctx context.Context, hash string) (*entry, er
 			// Do NOT spin/retry — surface a clear, wrapped error for the caller to back off.
 			metrics.IncCreateRateLimited()
 			return nil, fmt.Errorf("materialize: createtorrent rate limited for %s: %w", short(hash), err)
+		case errors.Is(err, torbox.ErrAlreadyQueued):
+			// Parked in TorBox's server-side queue (account cooldown / slots full). Not
+			// permanent: TorBox auto-starts it when capacity frees, so defer retries
+			// instead of erroring the release — the next read after the window adopts it.
+			deadline := m.now().Add(constants.QueuedDeferral)
+			m.mu.Lock()
+			m.deferred[hash] = deadline.UnixNano()
+			m.mu.Unlock()
+			m.log.Warn("materialize: queued upstream (cooldown/slots), deferring retries",
+				"hash", short(hash), "retry_after", constants.QueuedDeferral)
+			return nil, fmt.Errorf("materialize: createtorrent %s: %w", short(hash), err)
 		case errors.Is(err, torbox.ErrNotFound):
 			// Dead-cache: TorBox purged this item, so it can never materialize. Mark it
 			// errored (permanent) and surface ErrPurged so the arr blacklists + re-grabs,

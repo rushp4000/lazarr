@@ -7,6 +7,7 @@ import (
 
 	"github.com/rushp4000/lazarr/internal/catalog"
 	"github.com/rushp4000/lazarr/internal/config"
+	"github.com/rushp4000/lazarr/internal/constants"
 	"github.com/rushp4000/lazarr/internal/metrics"
 	"github.com/rushp4000/lazarr/internal/torbox"
 )
@@ -332,5 +333,61 @@ func TestMountIsHealthy_NilGuard(t *testing.T) {
 	t.Cleanup(func() { _ = m.Close() })
 	if !m.mountIsHealthy() {
 		t.Fatal("nil mount-health guard must report healthy (reap as before)")
+	}
+}
+
+// TestMaterialize_QueuedUpstreamDefersRetries proves a createtorrent answered with
+// "Download already queued." (TorBox parked the add server-side: account cooldown /
+// slots full) defers the hash: reads inside the deferral window fail fast with NO
+// further CreateTorrent call, and a read after the window retries the add. Live
+// failure mode 2026-06-12: an arr import loop re-POSTed createtorrent ~120×/hour
+// against a cooldown-locked account.
+func TestMaterialize_QueuedUpstreamDefersRetries(t *testing.T) {
+	store := newFakeStore()
+	tb := newFakeTorBox()
+	tb.createErrOnce = torbox.ErrAlreadyQueued
+	newRelease(store, "queuedhash", "magnet:?xt=urn:btih:queuedhash")
+
+	m, err := New(Deps{Store: store, TorBox: tb, Policy: config.Policy{ActiveSlots: 1}})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	m.SetLogger(quietLogger())
+	now := time.Unix(1_000_000, 0)
+	m.SetNow(func() time.Time { return now })
+	t.Cleanup(func() { _ = m.Close() })
+
+	p := make([]byte, 16)
+	_, rerr := m.ReadAt("queuedhash", 0, p, 0)
+	if !errors.Is(rerr, torbox.ErrAlreadyQueued) {
+		t.Fatalf("first ReadAt err = %v, want ErrAlreadyQueued", rerr)
+	}
+	if got := tb.createCount(); got != 1 {
+		t.Fatalf("createCount after first read = %d, want 1", got)
+	}
+	// The release must NOT be marked errored — queued upstream is recoverable.
+	if st := store.state("queuedhash"); st == catalog.StateError {
+		t.Fatalf("release state = %q; queued upstream must not be permanent", st)
+	}
+
+	// Inside the deferral window: fail fast, no new CreateTorrent.
+	_, rerr2 := m.ReadAt("queuedhash", 0, p, 0)
+	if !errors.Is(rerr2, torbox.ErrAlreadyQueued) {
+		t.Fatalf("second ReadAt err = %v, want ErrAlreadyQueued", rerr2)
+	}
+	if got := tb.createCount(); got != 1 {
+		t.Fatalf("createCount inside deferral window = %d, want 1 (no hot retry)", got)
+	}
+
+	// After the window: the next read retries the add (createErrOnce is consumed, so
+	// the fake now succeeds). The read may still fail later in the chain (no dlURLFn),
+	// but the deferral must be lifted and CreateTorrent attempted again.
+	m.SetNow(func() time.Time { return now.Add(constants.QueuedDeferral + time.Second) })
+	_, rerr3 := m.ReadAt("queuedhash", 0, p, 0)
+	if errors.Is(rerr3, torbox.ErrAlreadyQueued) {
+		t.Fatalf("third ReadAt err = %v; deferral must lift after the window", rerr3)
+	}
+	if got := tb.createCount(); got != 2 {
+		t.Fatalf("createCount after deferral window = %d, want 2 (retry attempted)", got)
 	}
 }
