@@ -62,11 +62,40 @@ func TestReadAt_Status200IgnoredRange(t *testing.T) {
 	}
 }
 
-// TestProbeCache_PartialPrefixIsMiss guards the fix for short probe-cache reads.
-// When the first cached read stores only a small prefix, a later larger read in
-// the same region must NOT be served as a short hit (which FUSE/ffprobe read as a
-// premature EOF) — it must miss and do a full live read returning the full window.
+// TestProbeCache_PartialPrefixIsMiss guards the all-or-nothing hit contract at the
+// probeCache layer: a window larger than the cached bytes must MISS, never be served
+// short (FUSE under DIRECT_IO would forward the short count to ffprobe/Plex as a
+// premature EOF). Engine-level partial prefixes can no longer occur (v1.1.5 fills the
+// whole region atomically), but the contract still protects corrupt/truncated cache
+// files, so it is pinned here directly.
 func TestProbeCache_PartialPrefixIsMiss(t *testing.T) {
+	pc, err := newProbeCache(t.TempDir(), 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefix := make([]byte, 1<<10)
+	for i := range prefix {
+		prefix[i] = byte(i % 251)
+	}
+	pc.maybeStore("dd8255ec", 0, 0, prefix) // only 1 KiB cached
+
+	big := make([]byte, 8<<10)
+	if _, ok := pc.readAt("dd8255ec", 0, big, 0); ok {
+		t.Fatal("window larger than cached prefix must be a MISS, not a short hit")
+	}
+	// A window fully inside the prefix still hits.
+	small := make([]byte, 512)
+	n, ok := pc.readAt("dd8255ec", 0, small, 256)
+	if !ok || n != len(small) || !bytes.Equal(small, prefix[256:256+512]) {
+		t.Fatal("window inside the cached prefix must hit with exact bytes")
+	}
+}
+
+// TestProbeCache_SecondLargerReadServedFromRegionFill pins the v1.1.5 engine behavior
+// that replaced the old partial-prefix scenario: the FIRST header read fills the whole
+// region in one GET, so a later, larger read at off 0 is a full cache hit — correct
+// bytes, full window, NO additional CDN traffic.
+func TestProbeCache_SecondLargerReadServedFromRegionFill(t *testing.T) {
 	content := make([]byte, 64<<10)
 	for i := range content {
 		content[i] = byte(i % 251)
@@ -74,27 +103,24 @@ func TestProbeCache_PartialPrefixIsMiss(t *testing.T) {
 	m, store, _, cdn := engineWithCDN(t, content, 2, t.TempDir())
 	newRelease(store, "dd8255ec", "magnet:?xt=urn:btih:dd8255ec")
 
-	// First read: small header probe at off 0 -> caches only 1 KiB.
 	small := make([]byte, 1<<10)
 	if _, err := m.ReadAt("dd8255ec", 0, small, 0); err != nil {
 		t.Fatalf("first read: %v", err)
 	}
 	hitsAfterFirst := cdn.totalHits()
 
-	// Second read: larger window at off 0, still within the 4 MiB region but bigger
-	// than the cached 1 KiB prefix. Must be a MISS -> full live read of 8 KiB.
 	big := make([]byte, 8<<10)
 	n, err := m.ReadAt("dd8255ec", 0, big, 0)
 	if err != nil {
 		t.Fatalf("second read: %v", err)
 	}
 	if n != len(big) {
-		t.Fatalf("short read from partial probe prefix: got %d, want %d (premature EOF)", n, len(big))
+		t.Fatalf("short read: got %d, want %d (premature EOF)", n, len(big))
 	}
 	if !bytes.Equal(big[:n], content[:n]) {
 		t.Fatalf("second read bytes mismatch")
 	}
-	if cdn.totalHits() == hitsAfterFirst {
-		t.Fatalf("expected a live CDN fetch (probe miss), but no new GET was made")
+	if got := cdn.totalHits(); got != hitsAfterFirst {
+		t.Fatalf("second read must be served from the filled region (no new GET); hits %d -> %d", hitsAfterFirst, got)
 	}
 }
