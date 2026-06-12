@@ -213,6 +213,7 @@ write-only there: it can be replaced but never displayed).
 | `log_level` | `info` | `debug` / `info` / `warn` / `error` — applied live, no restart |
 | `torbox.api_key` | — | your TorBox API key (**required**) |
 | `torbox.api_base` | `https://api.torbox.app/v1/api` | API base URL |
+| `torbox.extra_cdn_hosts` | `[]` | extra CDN host suffixes (e.g. `.tb-cdn.net`) if TorBox ships a CDN domain Lazarr doesn't know yet |
 | `qbit.listen` | `:8080` | arr-facing qBittorrent API |
 | `qbit.username` / `qbit.password` | `lazarr`/`lazarr` | credentials the arrs use |
 | `categories` | `[]` | one per arr instance |
@@ -266,8 +267,8 @@ write-only there: it can be replaced but never displayed).
 
 ## Privacy
 
-Lazarr talks to exactly two endpoints: `api.torbox.app` and TorBox's `*.tb-cdn.io`
-content CDN. **No telemetry, no phone-home, no update checks, no analytics.** The Web UI
+Lazarr talks to exactly two endpoints: `api.torbox.app` and TorBox's content CDN
+(`*.tb-cdn.io` / `*.tb-cdn.earth`, extensible via `torbox.extra_cdn_hosts`). **No telemetry, no phone-home, no update checks, no analytics.** The Web UI
 is fully embedded in the binary (no external fonts/scripts). See
 [ARCHITECTURE.md](ARCHITECTURE.md) for the full internals and the TorBox-only provider
 constraints.

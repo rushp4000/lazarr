@@ -4,6 +4,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/rushp4000/lazarr/internal/constants"
@@ -39,6 +40,13 @@ func (d Duration) D() time.Duration { return time.Duration(d) }
 type TorBox struct {
 	APIKey  string `yaml:"api_key"`
 	APIBase string `yaml:"api_base"`
+	// ExtraCDNHosts are additional CDN host SUFFIXES the stream proxy's host-pin
+	// accepts, e.g. ".tb-cdn.net". The built-ins (.tb-cdn.io, .tb-cdn.earth) are
+	// always allowed. TorBox occasionally serves a CDN option under a brand-new
+	// domain (ERTH shipped under .tb-cdn.earth and broke pinned installs until
+	// v1.1.1) — this is the operator escape hatch so streaming can be unblocked by
+	// a config edit instead of waiting for a Lazarr release.
+	ExtraCDNHosts []string `yaml:"extra_cdn_hosts,omitempty"`
 }
 
 type QBit struct {
@@ -249,6 +257,16 @@ func (c *Config) validate() error {
 	}
 	if c.Policy.ReadaheadWindows < 0 || c.Policy.ReadaheadWindows > 32 {
 		return fmt.Errorf("readahead_windows (%d) must be 0..32", c.Policy.ReadaheadWindows)
+	}
+
+	// (g) extra_cdn_hosts entries must look like real multi-label host suffixes
+	// ("x.y" minimum; leading dot optional). A one-label suffix like ".io" would
+	// pin half the internet onto the SSRF allowlist — reject it loudly.
+	for _, s := range c.TorBox.ExtraCDNHosts {
+		t := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(s)), ".")
+		if t == "" || !strings.Contains(t, ".") || strings.ContainsAny(t, "/:@?#%* \t") {
+			return fmt.Errorf("torbox.extra_cdn_hosts entry %q must be a host suffix like \".tb-cdn.net\"", s)
+		}
 	}
 
 	// (f) log_level must be a recognized name (empty = info).

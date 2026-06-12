@@ -204,6 +204,13 @@ func (p *prefetcher) getChunk(ctx context.Context, ent *entry, fileID int, idx i
 // The entry is re-pinned for the fetch so a concurrent release can't yank the
 // TorBox item from under the read.
 func (p *prefetcher) prefetchAsync(m *materializer, hash string, fileID int, idx int64) {
+	// CDN-throttle breaker: while a 429 window is open, schedule NOTHING speculative.
+	// Foreground reads keep going (the player needs them); readahead resumes when the
+	// window elapses. Without this, prefetch competes with the blocked foreground read
+	// for the same per-IP budget and prolongs the throttle.
+	if m.throttledNow() {
+		return
+	}
 	key := chunkKey{hash, fileID, idx}
 	p.mu.Lock()
 	if _, ok := p.cache[key]; ok {

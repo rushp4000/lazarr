@@ -27,6 +27,10 @@ type Deps struct {
 	// internal/constants (not tunable here). Each read fetches exactly its window — there
 	// is no readahead widening (it only wasted CDN bandwidth; see proxy.getRange).
 	ProbeCacheDir string
+	// ExtraCDNHosts are additional host suffixes for the stream proxy's CDN host-pin
+	// (config torbox.extra_cdn_hosts) — the operator escape hatch for a TorBox CDN
+	// domain Lazarr does not know yet. Built-ins always apply; see proxy.go.
+	ExtraCDNHosts []string
 }
 
 // RepairEntry describes a single release whose content is no longer available on TorBox's

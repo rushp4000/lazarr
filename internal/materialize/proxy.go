@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,16 +18,30 @@ import (
 	"github.com/rushp4000/lazarr/internal/torbox"
 )
 
-// cdnHostSuffixes is the production host-pin: presigned CDN URLs must terminate at one
+// cdnHostSuffixes is the BUILT-IN host-pin: presigned CDN URLs must terminate at one
 // of TorBox's CDN domains. TorBox serves regional PoPs under *.tb-cdn.io (observed:
 // nexus-138.snam.tb-cdn.io) and the Cloudflare-fronted ERTH PoP under *.tb-cdn.earth
 // (observed: nexus.erth.tb-cdn.earth). Verified live (docs/08 + docs/11 + docs/25).
+// Operators can append suffixes via config torbox.extra_cdn_hosts (see newProxy) —
+// the escape hatch for the next time TorBox ships a CDN under a new domain.
 var cdnHostSuffixes = []string{".tb-cdn.io", ".tb-cdn.earth"}
+
+// normalizeSuffix canonicalizes a configured host suffix: lowercase, trimmed, with a
+// single leading dot. Empty/garbage entries collapse to "" (caller skips them;
+// config.validate already rejects them loudly at load/save time).
+func normalizeSuffix(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	s = "." + strings.TrimPrefix(s, ".")
+	if s == "." || !strings.Contains(s[1:], ".") {
+		return ""
+	}
+	return s
+}
 
 // hostPinned reports whether host terminates at one of the allowed TorBox CDN domains,
 // requiring a real label boundary (so "evil.com.tb-cdn.io.attacker.net" is rejected).
-func hostPinned(host string) bool {
-	for _, s := range cdnHostSuffixes {
+func (p *proxy) hostPinned(host string) bool {
+	for _, s := range p.pinSuffixes {
 		if host == strings.TrimPrefix(s, ".") || strings.HasSuffix(host, s) {
 			return true
 		}
@@ -58,15 +73,75 @@ var errSSRFBlocked = errors.New("materialize: CDN URL blocked by host-pin/SSRF p
 var errCDNUnreachable = errors.New("materialize: CDN host unreachable")
 
 // errCDNThrottled marks an HTTP 429 from the CDN: the presigned link is fine, the
-// node is just rate-limiting a parallel burst (observed live 2026-06-10 once
-// readahead pushed ~18 MB/s: foreground reads started 429ing). Refreshing the link
-// would not help — the right move is a short backoff + retry, and keeping prefetch
-// concurrency modest (see prefetcher semaphore).
+// node is just rate-limiting a burst. Observed live twice: 2026-06-10 (readahead at
+// ~18 MB/s on a tb-cdn.io node) and 2026-06-12 (Cloudflare/ERTH 429ing the fresh-import
+// read storm — radarr ffprobe + Plex analysis + playback — which surfaced EIO to the
+// player within ~1.2s and killed playback startup). Refreshing the link would not
+// help — the right moves are a PATIENT bounded backoff (a FUSE read that blocks a few
+// seconds just looks like buffering; a read ERROR kills the stream) and pausing the
+// prefetcher so speculative reads don't eat the budget (see noteThrottle).
 var errCDNThrottled = errors.New("materialize: CDN throttled (HTTP 429)")
 
+// throttledError carries the CDN's Retry-After hint alongside the errCDNThrottled
+// identity (errors.Is matches via Unwrap). retryAfter==0 means "no usable hint".
+type throttledError struct{ retryAfter time.Duration }
+
+func (e *throttledError) Error() string { return errCDNThrottled.Error() }
+func (e *throttledError) Unwrap() error { return errCDNThrottled }
+
 // throttleBackoffs are the waits between 429 retries on the FOREGROUND read path.
-// Two retries cover a transient burst limit without stalling a player visibly.
-var throttleBackoffs = []time.Duration{300 * time.Millisecond, 900 * time.Millisecond}
+// The ladder is deliberately patient (~8s total): Cloudflare-class CDNs rate-limit
+// for whole seconds, and the alternative to waiting is an I/O error to the player.
+// When the CDN sends Retry-After, the larger of (ladder step, Retry-After) is used.
+var throttleBackoffs = []time.Duration{
+	300 * time.Millisecond, 900 * time.Millisecond, 2 * time.Second, 5 * time.Second,
+}
+
+// maxRetryAfter caps how long a CDN-supplied Retry-After can stall one retry step, so
+// a hostile/buggy header can't pin a FUSE read for minutes.
+const maxRetryAfter = 10 * time.Second
+
+// throttlePause is how long the prefetcher stays paused after any 429 (the breaker
+// window). Speculative readahead resumes automatically once it elapses.
+const throttlePause = 30 * time.Second
+
+// noteThrottle opens/extends the prefetch breaker window after an observed 429.
+func (m *materializer) noteThrottle() {
+	until := m.now().Add(throttlePause).UnixNano()
+	for {
+		cur := m.throttledUntil.Load()
+		if cur >= until || m.throttledUntil.CompareAndSwap(cur, until) {
+			return
+		}
+	}
+}
+
+// throttledNow reports whether the prefetch breaker window is open.
+func (m *materializer) throttledNow() bool {
+	return m.now().UnixNano() < m.throttledUntil.Load()
+}
+
+// retryAfterDuration parses a Retry-After header (delta-seconds or HTTP-date),
+// clamped to [0, maxRetryAfter]. Returns 0 for absent/unparseable values.
+func retryAfterDuration(h string, now time.Time) time.Duration {
+	h = strings.TrimSpace(h)
+	if h == "" {
+		return 0
+	}
+	var d time.Duration
+	if secs, err := strconv.Atoi(h); err == nil {
+		d = time.Duration(secs) * time.Second
+	} else if t, err := http.ParseTime(h); err == nil {
+		d = t.Sub(now)
+	}
+	if d < 0 {
+		d = 0
+	}
+	if d > maxRetryAfter {
+		d = maxRetryAfter
+	}
+	return d
+}
 
 // proxy issues SSRF-safe ranged GETs to the presigned CDN URL. Security (docs/15 §4.F):
 //   - require https + pin the host to *.tb-cdn.io (plus a configurable allowlist),
@@ -77,18 +152,29 @@ var throttleBackoffs = []time.Duration{300 * time.Millisecond, 900 * time.Millis
 type proxy struct {
 	hc *http.Client
 
-	// allowExtraHosts is the test-only seam. In production it is EMPTY, so only *.tb-cdn.io
-	// passes. Tests stand up an httptest.Server on 127.0.0.1 and call allowHost() to permit
-	// that exact host:port WITHOUT weakening the production default. allowLoopback gates the
-	// dial-time loopback rejection so the httptest server is reachable in happy-path tests.
+	// pinSuffixes is the effective host-pin: the built-in cdnHostSuffixes plus any
+	// operator-configured torbox.extra_cdn_hosts (normalized). Immutable after newProxy.
+	pinSuffixes []string
+
+	// allowExtraHosts is the test-only seam. In production it is EMPTY, so only the pinned
+	// suffixes pass. Tests stand up an httptest.Server on 127.0.0.1 and call allowHost() to
+	// permit that exact host:port WITHOUT weakening the production default. allowLoopback
+	// gates the dial-time loopback rejection so the httptest server is reachable in tests.
 	allowExtraHosts map[string]struct{}
 	allowLoopback   bool
 }
 
-// newProxy builds the SSRF-safe proxy with the production default (no extra hosts, loopback
-// refused). The dialer re-validates the resolved IP of every connection.
-func newProxy() *proxy {
+// newProxy builds the SSRF-safe proxy with the production default (built-in pin plus the
+// operator's extra suffixes, loopback refused). The dialer re-validates the resolved IP
+// of every connection.
+func newProxy(extraSuffixes []string) *proxy {
 	p := &proxy{allowExtraHosts: make(map[string]struct{})}
+	p.pinSuffixes = append(p.pinSuffixes, cdnHostSuffixes...)
+	for _, s := range extraSuffixes {
+		if n := normalizeSuffix(s); n != "" {
+			p.pinSuffixes = append(p.pinSuffixes, n)
+		}
+	}
 
 	dialer := &net.Dialer{Timeout: proxyDialTimeout}
 	transport := &http.Transport{
@@ -182,12 +268,13 @@ func (p *proxy) validateURL(u *url.URL) error {
 			return fmt.Errorf("%w: literal private/loopback IP %s", errSSRFBlocked, ip)
 		}
 		// A public literal IP still isn't a pinned TorBox CDN host -> reject.
-		return fmt.Errorf("%w: literal IP host %s not pinned to %v", errSSRFBlocked, ip, cdnHostSuffixes)
+		return fmt.Errorf("%w: literal IP host %s not pinned to %v", errSSRFBlocked, ip, p.pinSuffixes)
 	}
 	// Host-suffix pin against the allowed TorBox CDN domains (real label boundary enforced
-	// inside hostPinned).
-	if !hostPinned(host) {
-		return fmt.Errorf("%w: host %q not under %v", errSSRFBlocked, host, cdnHostSuffixes)
+	// inside hostPinned). The hint matters operationally: when TorBox ships a CDN under a
+	// new domain, this is the error every read fails with, and the fix is one config line.
+	if !p.hostPinned(host) {
+		return fmt.Errorf("%w: host %q not under %v — if TorBox introduced a new CDN domain, add its suffix to torbox.extra_cdn_hosts in config.yaml", errSSRFBlocked, host, p.pinSuffixes)
 	}
 	return nil
 }
@@ -222,15 +309,27 @@ func (m *materializer) proxyRead(ctx context.Context, ent *entry, fileID int, p 
 
 	n, body, err := m.prox.getRange(ctx, link.URL, p, off, m.probe != nil)
 
-	// 429 burst limit: back off briefly and retry the SAME link (it is valid; the
-	// node is pacing us). Bounded — after the backoff budget the error surfaces.
+	// 429 burst limit: pause the prefetcher (so speculative reads stop eating the CDN's
+	// budget), then back off and retry the SAME link (it is valid; the node is pacing
+	// us). Each wait is the LARGER of the ladder step and the CDN's Retry-After hint.
+	// Bounded — after the ladder (~8s) the error surfaces. A multi-second blocked FUSE
+	// read just looks like buffering to a player; a read error kills playback.
 	for attempt := 0; errors.Is(err, errCDNThrottled) && attempt < len(throttleBackoffs); attempt++ {
+		m.noteThrottle()
+		wait := throttleBackoffs[attempt]
+		var te *throttledError
+		if errors.As(err, &te) && te.retryAfter > wait {
+			wait = te.retryAfter
+		}
 		select {
 		case <-ctx.Done():
 			return 0, nil, ctx.Err()
-		case <-time.After(throttleBackoffs[attempt]):
+		case <-time.After(wait):
 		}
 		n, body, err = m.prox.getRange(ctx, link.URL, p, off, m.probe != nil)
+	}
+	if errors.Is(err, errCDNThrottled) {
+		m.noteThrottle() // exhausted the ladder: keep prefetch paused while the CDN cools off
 	}
 	if err == nil {
 		return n, body, nil
@@ -351,7 +450,8 @@ func (p *proxy) getRange(ctx context.Context, rawURL string, dst []byte, off int
 		}
 	default:
 		if resp.StatusCode == http.StatusTooManyRequests {
-			return 0, nil, errCDNThrottled
+			metrics.IncCDNThrottled()
+			return 0, nil, &throttledError{retryAfter: retryAfterDuration(resp.Header.Get("Retry-After"), time.Now())}
 		}
 		// A presigned-link 4xx (400/403/410) OR a 404 means the link is stale — most often
 		// because the TorBox copy it referenced was released and re-added with a new presigned

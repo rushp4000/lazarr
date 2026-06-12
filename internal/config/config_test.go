@@ -96,6 +96,25 @@ func TestValidate(t *testing.T) {
 			mutate:  func(c *Config) { c.Ownership.PUID = 0; c.Ownership.PGID = 1003 },
 			wantErr: "must both be set",
 		},
+		{
+			name:   "extra_cdn_hosts valid suffixes",
+			mutate: func(c *Config) { c.TorBox.ExtraCDNHosts = []string{".tb-cdn.net", "tb-cdn.example"} },
+		},
+		{
+			name:    "extra_cdn_hosts single-label suffix",
+			mutate:  func(c *Config) { c.TorBox.ExtraCDNHosts = []string{".io"} },
+			wantErr: "extra_cdn_hosts",
+		},
+		{
+			name:    "extra_cdn_hosts with scheme junk",
+			mutate:  func(c *Config) { c.TorBox.ExtraCDNHosts = []string{"https://tb-cdn.net"} },
+			wantErr: "extra_cdn_hosts",
+		},
+		{
+			name:    "extra_cdn_hosts empty entry",
+			mutate:  func(c *Config) { c.TorBox.ExtraCDNHosts = []string{""} },
+			wantErr: "extra_cdn_hosts",
+		},
 	}
 
 	for _, tc := range cases {
