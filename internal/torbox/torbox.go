@@ -11,6 +11,14 @@ var ErrLinkExpired = errors.New("torbox: presigned link expired (refresh)")
 // ErrRateLimited signals the ~60/hour createtorrent limit ("60 per 1 hour").
 var ErrRateLimited = errors.New("torbox: createtorrent rate limited")
 
+// ErrAlreadyQueued signals createtorrent was accepted upstream but TorBox parked the
+// download in its server-side queue (HTTP 400 "Download already queued.") — seen while
+// the account is inside its add-cooldown window or out of active download slots. This is
+// recoverable by waiting: TorBox auto-starts queued downloads when capacity frees, after
+// which a later createtorrent returns the live torrent id. The engine must NOT retry hot —
+// each re-POST burns the createtorrent budget without changing the outcome.
+var ErrAlreadyQueued = errors.New("torbox: download queued upstream (cooldown/slots)")
+
 // ErrNotFound signals the torrent/cache is gone at materialize time: createtorrent
 // (cached-only) reports the hash is not cached / not found, or requestdl reports the
 // torrent does not exist. This is the dead-cache case (TorBox purged a stale item) —

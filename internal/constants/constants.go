@@ -41,4 +41,10 @@ var (
 	DefaultCloseDrain      = 5 * time.Second
 	LinkRefreshStatuses    = []int{400, 403, 410} // re-request presigned URL then retry
 	DefaultRepairScanEvery = 24 * time.Hour       // how often the repair scan runs
+	// QueuedDeferral is how long the engine waits before retrying createtorrent for a
+	// hash TorBox has parked in its server-side queue ("Download already queued.",
+	// account cooldown / slots full). Reads inside the window fail fast with NO TorBox
+	// call: hot retries burn the 60/hr createtorrent budget without changing the
+	// outcome, and arr import loops retry every ~60s otherwise.
+	QueuedDeferral = 10 * time.Minute
 )

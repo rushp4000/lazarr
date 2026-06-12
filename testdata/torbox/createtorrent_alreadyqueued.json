@@ -1,0 +1,6 @@
+{
+  "success": false,
+  "error": "DOWNLOAD_ALREADY_QUEUED",
+  "detail": "Download already queued.",
+  "data": null
+}

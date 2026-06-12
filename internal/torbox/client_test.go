@@ -254,6 +254,35 @@ func TestCreateTorrent_RateLimit(t *testing.T) {
 	assert.True(t, errors.Is(err, torbox.ErrRateLimited), "must return ErrRateLimited, got: %v", err)
 }
 
+// TestCreateTorrent_AlreadyQueued proves the HTTP 400 "Download already queued." answer
+// (TorBox parked the add in its server-side queue: account cooldown / slots full) maps to
+// the typed ErrAlreadyQueued sentinel — observed live 2026-06-12. 400 is in the
+// link-refresh status set, so this exercises the transport-error path, not the envelope
+// path.
+func TestCreateTorrent_AlreadyQueued(t *testing.T) {
+	fixture := readFixture(t, "createtorrent_alreadyqueued.json")
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		jsonRespStatus(w, http.StatusBadRequest, fixture)
+	})
+
+	_, _, err := c.CreateTorrent("magnet:?xt=urn:btih:aabb", false)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, torbox.ErrAlreadyQueued), "must return ErrAlreadyQueued, got: %v", err)
+}
+
+// TestCreateTorrent_AlreadyQueuedEnvelope covers the same condition reported in a 2xx
+// envelope with success != true.
+func TestCreateTorrent_AlreadyQueuedEnvelope(t *testing.T) {
+	fixture := readFixture(t, "createtorrent_alreadyqueued.json")
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		jsonResp(w, fixture)
+	})
+
+	_, _, err := c.CreateTorrent("magnet:?xt=urn:btih:aabb", false)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, torbox.ErrAlreadyQueued), "must return ErrAlreadyQueued, got: %v", err)
+}
+
 // ---------------------------------------------------------------------------
 // RequestDL
 // ---------------------------------------------------------------------------

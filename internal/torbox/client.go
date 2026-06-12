@@ -369,6 +369,14 @@ func (c *client) CreateTorrent(magnet string, addOnlyIfCached bool) (int64, stri
 
 	env, _, err := c.doPOSTMultipart(context.Background(), constants.EpCreateTorrent, fields)
 	if err != nil {
+		// Queued upstream arrives as HTTP 400 "Download already queued." — which the
+		// transport surfaces as an apiError because 400 is in the link-refresh status
+		// set. Map it before the generic wrap so the engine defers instead of
+		// hot-retrying on every read.
+		var ae *apiError
+		if errors.As(err, &ae) && detailAlreadyQueued(ae.Detail) {
+			return 0, "", ErrAlreadyQueued
+		}
 		return 0, "", fmt.Errorf("torbox: createtorrent: %w", err)
 	}
 
@@ -376,6 +384,11 @@ func (c *client) CreateTorrent(magnet string, addOnlyIfCached bool) (int64, stri
 	if !env.isSuccess() {
 		if strings.Contains(env.Detail, "60 per 1 hour") {
 			return 0, "", ErrRateLimited
+		}
+		// Queued upstream reported in a 2xx envelope (success != true) — same meaning
+		// as the HTTP 400 form mapped above.
+		if detailAlreadyQueued(env.Detail) {
+			return 0, "", ErrAlreadyQueued
 		}
 		// Dead-cache: a cached-only add whose hash is no longer cached / not found.
 		// Surface the typed sentinel so the engine can mark the release errored.
@@ -439,6 +452,13 @@ func (c *client) RequestDL(torrentID int64, fileID int) (string, error) {
 // detailNotFound reports whether a TorBox detail string indicates the torrent/cache
 // is gone (not found / not cached / does not exist). Matched conservatively so the
 // dead-cache path triggers only on a genuine "gone" signal.
+// detailAlreadyQueued reports whether a TorBox detail string indicates the add was
+// parked in the server-side download queue (account cooldown / slots full) — observed
+// live as HTTP 400 "Download already queued." during an account cooldown window.
+func detailAlreadyQueued(detail string) bool {
+	return strings.Contains(strings.ToLower(detail), "already queued")
+}
+
 func detailNotFound(detail string) bool {
 	d := strings.ToLower(detail)
 	return strings.Contains(d, "not found") ||
