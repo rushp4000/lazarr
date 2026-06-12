@@ -87,6 +87,12 @@ type materializer struct {
 	// the admin /health endpoint. Atomic: written by the audit loop, read by /health.
 	lastAudit atomic.Int64
 
+	// throttledUntil (unix nanos) is the CDN-throttle circuit breaker: while now() is
+	// before it, the prefetcher schedules NO speculative reads, so the foreground
+	// (player-blocking) reads get the CDN's whole request budget. Set by proxyRead
+	// whenever the CDN answers 429; read by prefetchAsync. Atomic: many readers/writers.
+	throttledUntil atomic.Int64
+
 	// sf dedupes concurrent first-materialize per hash so exactly one CreateTorrent runs.
 	sf singleflight.Group
 
@@ -145,7 +151,7 @@ func New(d Deps) (*materializer, error) {
 		seen:         make(map[int64]struct{}),
 		inflight:     make(map[string]struct{}),
 		drainTimeout: constants.DefaultCloseDrain,
-		prox:         newProxy(),
+		prox:         newProxy(d.ExtraCDNHosts),
 	}
 
 	// Resolve the active-slot budget: explicit policy > UserMe() > DefaultActiveSlots.

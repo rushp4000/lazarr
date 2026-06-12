@@ -66,13 +66,17 @@ var (
 		Name: "lazarr_reaper_skipped_total",
 		Help: "Reaper sweeps skipped because the FUSE mount was unhealthy (reaping paused; alert if rising).",
 	})
+	cdnThrottled = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "lazarr_cdn_throttled_total",
+		Help: "HTTP 429 responses from the CDN. Each pauses readahead and triggers a patient foreground retry; sustained growth means the CDN is pacing this host.",
+	})
 )
 
 func init() {
 	reg.MustRegister(
 		grabs, materializes, releases, linkRefresh, createRateLimited,
 		probeHits, probeMisses, materializedCount, slotsInUse, tosAuditLeaks,
-		reaperSkipped,
+		reaperSkipped, cdnThrottled,
 	)
 }
 
@@ -87,6 +91,7 @@ func IncCreateRateLimited() { createRateLimited.Inc() }
 func IncProbeHit()          { probeHits.Inc() }
 func IncProbeMiss()         { probeMisses.Inc() }
 func IncReaperSkipped()     { reaperSkipped.Inc() }
+func IncCDNThrottled()      { cdnThrottled.Inc() }
 
 func SetMaterializedCount(n int) { materializedCount.Set(float64(n)) }
 func SetSlotsInUse(n int)        { slotsInUse.Set(float64(n)) }

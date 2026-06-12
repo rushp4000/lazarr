@@ -8,6 +8,12 @@ log_level: "info"          # debug | info | warn | error (debug = every request/
 torbox:
   api_key: "PUT-YOUR-TORBOX-KEY-HERE"        # from your TorBox account
   api_base: "https://api.torbox.app/v1/api"  # verified base (the /v1 matters)
+  # extra_cdn_hosts: additional CDN host suffixes the stream proxy accepts, on top of the
+  # built-ins (.tb-cdn.io, .tb-cdn.earth). Only needed if TorBox introduces a CDN under a
+  # NEW domain (Settings -> CDN Selection) before a Lazarr release knows about it — reads
+  # then fail with "host ... not under [...]" and one line here unblocks streaming.
+  # extra_cdn_hosts:
+  #   - ".tb-cdn.net"
 
 qbit:
   listen: ":8080"        # the arr points its qBittorrent client here

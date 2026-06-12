@@ -108,6 +108,7 @@ func main() {
 		TorBox:        tb,
 		Policy:        cfg.Policy,
 		ProbeCacheDir: cfg.Paths.ProbeCacheDir,
+		ExtraCDNHosts: cfg.TorBox.ExtraCDNHosts,
 	})
 	if err != nil {
 		slog.Error("materialize engine", "err", err)
