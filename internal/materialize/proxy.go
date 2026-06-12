@@ -16,6 +16,7 @@ import (
 	"github.com/rushp4000/lazarr/internal/constants"
 	"github.com/rushp4000/lazarr/internal/metrics"
 	"github.com/rushp4000/lazarr/internal/torbox"
+	"github.com/rushp4000/lazarr/internal/version"
 )
 
 // cdnHostSuffixes is the BUILT-IN host-pin: presigned CDN URLs must terminate at one
@@ -57,6 +58,22 @@ const (
 	proxyRespHeaderWait = 30 * time.Second
 	proxyTotalTimeout   = 5 * time.Minute // whole ranged GET (covers slow large-window reads)
 )
+
+// Stall guard (riven lesson): a sick-but-responding CDN node can trickle a window over
+// minutes — a 200/206 that is effectively dead. Each getRange runs under its own
+// deadline scaled to the window size; tripping it is classified errCDNUnreachable, so
+// proxyRead's existing refresh re-pins a healthy node. The floor keeps small windows
+// from being twitchy; the rate (128 KiB/s) is far below any watchable stream yet far
+// above a dying node's trickle.
+var (
+	stallFloor       = 20 * time.Second // test seam: white-box tests shrink this
+	stallBytesPerSec = int64(128 << 10)
+)
+
+// stallTimeout returns the deadline budget for one ranged GET of n bytes.
+func stallTimeout(n int) time.Duration {
+	return stallFloor + time.Duration(int64(n)/stallBytesPerSec)*time.Second
+}
 
 // errSSRFBlocked is returned when a URL fails the host-pin / scheme / private-IP checks
 // BEFORE any network request is made.
@@ -418,11 +435,19 @@ func (p *proxy) getRange(ctx context.Context, rawURL string, dst []byte, off int
 	// Fetch exactly the requested window: bytes=off-(off+want-1). The server caps at EOF.
 	last := off + want - 1
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	// Stall guard: the whole GET (headers + body) must finish within a budget scaled to
+	// the window size. ctx stays the PARENT — the error-classification paths below check
+	// ctx.Err() (caller cancel passes through untouched), so a tripped stall deadline
+	// falls into the errCDNUnreachable branches and triggers the refresh/re-pin.
+	stallCtx, cancelStall := context.WithTimeout(ctx, stallTimeout(len(dst)))
+	defer cancelStall()
+
+	req, err := http.NewRequestWithContext(stallCtx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return 0, nil, redactURL(err)
 	}
 	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", off, last))
+	req.Header.Set("User-Agent", version.UserAgent())
 
 	resp, err := p.hc.Do(req)
 	if err != nil {
@@ -452,6 +477,13 @@ func (p *proxy) getRange(ctx context.Context, rawURL string, dst []byte, off int
 		if resp.StatusCode == http.StatusTooManyRequests {
 			metrics.IncCDNThrottled()
 			return 0, nil, &throttledError{retryAfter: retryAfterDuration(resp.Header.Get("Retry-After"), time.Now())}
+		}
+		// 416 Range Not Satisfiable = the requested range starts at/past the entity's end.
+		// That is EOF, not an error (riven lesson): it happens when the catalog's file size
+		// drifts slightly past the CDN entity's true size, and surfacing EIO here would
+		// kill the final seconds of a playback. 0 bytes + nil error = clean EOF upstream.
+		if resp.StatusCode == http.StatusRequestedRangeNotSatisfiable {
+			return 0, nil, nil
 		}
 		// A presigned-link 4xx (400/403/410) OR a 404 means the link is stale — most often
 		// because the TorBox copy it referenced was released and re-added with a new presigned

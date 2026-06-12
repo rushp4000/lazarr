@@ -354,6 +354,38 @@ func (m *materializer) ReadAt(hash string, fileID int, p []byte, off int64) (int
 	}
 	ctx := context.Background()
 
+	// 0. Probe cache FIRST — BEFORE materializing. Header and footer regions are immutable
+	// (torrent content, keyed by infohash), so a cached metadata window can be served while
+	// the release stays VIRTUAL: a Plex/ffprobe scan of an already-released item costs zero
+	// TorBox adds and zero CDN traffic. (Pre-v1.1.4 this lookup sat after the materialize
+	// call, so every scan of a released item burned an add against the createtorrent budget.)
+	fileSize := int64(0)
+	if m.probe != nil {
+		fileSize = fileSizeFromStore(m, hash, fileID)
+		headCov := m.probe.covers(off, int64(len(p)))
+		footCov := m.probe.coversFooter(fileSize, off, int64(len(p)))
+		// For files smaller than the header region the two regions OVERLAP (the footer
+		// region of a tiny file is the whole file), so try both caches before declaring
+		// a miss — whichever holds the window serves it.
+		if headCov {
+			if n, ok := m.probe.readAt(hash, fileID, p, off); ok {
+				metrics.IncProbeHit()
+				_ = m.store.TouchAccess(hash, m.now().Unix())
+				return n, nil
+			}
+		}
+		if footCov {
+			if n, ok := m.probe.readAtFooter(hash, fileID, p, off); ok {
+				metrics.IncProbeHit()
+				_ = m.store.TouchAccess(hash, m.now().Unix())
+				return n, nil
+			}
+		}
+		if headCov || footCov {
+			metrics.IncProbeMiss()
+		}
+	}
+
 	// 1+2. Ensure the release is materialized and pinned (refs++). Singleflight dedupes
 	// concurrent first-reads; admit() handles the slot semaphore + LRU eviction.
 	ent, err := m.ensureMaterialized(ctx, hash)
@@ -366,15 +398,14 @@ func (m *materializer) ReadAt(hash string, fileID int, p []byte, off int64) (int
 	// 5. Record access for the idle reaper (every read).
 	_ = m.store.TouchAccess(hash, m.now().Unix())
 
-	// Probe-header cache: serve metadata-region reads from disk so Plex's header scan of a
-	// freshly imported item doesn't re-hit the CDN (and never triggers a 2nd CreateTorrent;
-	// the add already happened above). Falls through to live proxy on a miss.
-	if m.probe != nil && m.probe.covers(off, int64(len(p))) {
-		if n, ok := m.probe.readAt(hash, fileID, p, off); ok {
-			metrics.IncProbeHit()
+	// Footer-region miss: fetch the WHOLE tail region in one GET, cache it, and serve the
+	// requested window from it. One bounded fetch (1-8 MiB) replaces the scatter of small
+	// tail reads every player/scanner makes for MKV cues / MP4 moov — and after release,
+	// future scans never re-materialize. Any failure falls through to the plain window path.
+	if m.probe != nil && m.probe.coversFooter(fileSize, off, int64(len(p))) {
+		if n, ok := m.fillFooter(ctx, ent, fileID, fileSize, p, off); ok {
 			return n, nil
 		}
-		metrics.IncProbeMiss()
 	}
 
 	// Bulk/sequential reads go through the readahead layer (parallel chunk windows).
@@ -408,6 +439,26 @@ func (m *materializer) ReadAt(hash string, fileID int, p []byte, off int64) (int
 		m.probe.maybeStore(hash, fileID, off, body)
 	}
 	return n, nil
+}
+
+// fillFooter fetches the file's entire footer region in one ranged GET, stores it in the
+// probe cache, and serves the requested window [off, off+len(p)) from the fetched bytes.
+// Returns ok=false on any failure so the caller falls through to the normal read path —
+// this is an optimization layer, never a correctness gate.
+func (m *materializer) fillFooter(ctx context.Context, ent *entry, fileID int, fileSize int64, p []byte, off int64) (int, bool) {
+	region := footerRegionFor(fileSize)
+	start := fileSize - region
+	buf := make([]byte, region)
+
+	n, _, err := m.proxyRead(ctx, ent, fileID, buf, start)
+	if err != nil || int64(n) < off-start+int64(len(p)) {
+		// Short/failed region fetch (size drift near EOF, transient CDN error): let the
+		// plain window path handle the read (and its own error semantics).
+		return 0, false
+	}
+	m.probe.storeFooter(ent.hash, fileID, start, buf[:n])
+	copied := copy(p, buf[off-start:n])
+	return copied, true
 }
 
 // ensureMaterialized guarantees the release identified by hash is added to TorBox and

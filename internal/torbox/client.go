@@ -20,6 +20,7 @@ import (
 
 	"github.com/rushp4000/lazarr/internal/config"
 	"github.com/rushp4000/lazarr/internal/constants"
+	"github.com/rushp4000/lazarr/internal/version"
 )
 
 // defaultTimeout is used on all outbound HTTP requests.
@@ -213,6 +214,7 @@ func (c *client) doRequest(
 		}
 		// Authorization header: never log or expose c.apiKey.
 		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+		req.Header.Set("User-Agent", version.UserAgent())
 		if contentType != "" {
 			req.Header.Set("Content-Type", contentType)
 		}
