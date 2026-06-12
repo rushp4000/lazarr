@@ -13,7 +13,32 @@ import (
 const (
 	defaultProbeRegionBytes = int64(4 << 20)   // 4 MiB header region per file
 	defaultProbeCacheBytes  = int64(512 << 20) // 512 MiB total on-disk budget (bounded)
+
+	// Footer region bounds (riven lesson): MKV cues and MP4 moov atoms live at the END
+	// of the file, so every playback start and every ffprobe reads the tail too. The
+	// region scales with file size (cue size grows with duration), clamped to sane bounds.
+	probeFooterMin   = int64(1 << 20) // 1 MiB
+	probeFooterMax   = int64(8 << 20) // 8 MiB
+	probeFooterRatio = int64(500)     // region = size/500 = 0.2% of the file
 )
+
+// footerRegionFor sizes the cached tail region for a file. 0 when size is unknown.
+func footerRegionFor(size int64) int64 {
+	if size <= 0 {
+		return 0
+	}
+	r := size / probeFooterRatio
+	if r < probeFooterMin {
+		r = probeFooterMin
+	}
+	if r > probeFooterMax {
+		r = probeFooterMax
+	}
+	if r > size {
+		r = size
+	}
+	return r
+}
 
 // probeCache is a bounded on-disk cache of file-header regions, keyed by (hash,fileID).
 // Reads that fall entirely within [0, region) for a cached key are served from disk.
@@ -28,6 +53,7 @@ type probeCache struct {
 	mu         sync.Mutex
 	order      []string         // insertion order of keys, for eviction
 	sizes      map[string]int64 // key -> bytes on disk
+	footStarts map[string]int64 // footer key -> absolute start offset of the cached tail
 	totalBytes int64
 }
 
@@ -50,10 +76,11 @@ func newProbeCache(dir string, maxBytes, region int64) (*probeCache, error) {
 		maxBytes = defaultProbeCacheBytes
 	}
 	return &probeCache{
-		dir:      dir,
-		region:   region,
-		maxBytes: maxBytes,
-		sizes:    make(map[string]int64),
+		dir:        dir,
+		region:     region,
+		maxBytes:   maxBytes,
+		sizes:      make(map[string]int64),
+		footStarts: make(map[string]int64),
 	}, nil
 }
 
@@ -149,6 +176,80 @@ func (c *probeCache) maybeStore(hash string, fileID int, off int64, body []byte)
 	c.mu.Unlock()
 }
 
+// footerKey is the on-disk filename for a (hash,fileID) tail region. The ".f" suffix
+// cannot collide with header keys: header keys end in the numeric fileID.
+func (c *probeCache) footerKey(hash string, fileID int) string {
+	return c.key(hash, fileID) + ".f"
+}
+
+// coversFooter reports whether a read at [off, off+length) lies entirely within the
+// file's footer region [size-footerRegionFor(size), size). size==0 (unknown) never covers.
+func (c *probeCache) coversFooter(size, off, length int64) bool {
+	r := footerRegionFor(size)
+	return r > 0 && off >= size-r && length >= 0 && off+length <= size
+}
+
+// readAtFooter serves a footer-region read from disk if present. Same all-or-nothing
+// contract as readAt: a window not fully covered by the cached tail is a MISS.
+func (c *probeCache) readAtFooter(hash string, fileID int, p []byte, off int64) (int, bool) {
+	k := c.footerKey(hash, fileID)
+
+	c.mu.Lock()
+	sz, ok := c.sizes[k]
+	start, sok := c.footStarts[k]
+	c.mu.Unlock()
+	if !ok || !sok || off < start || off+int64(len(p)) > start+sz {
+		return 0, false
+	}
+
+	f, err := os.Open(filepath.Join(c.dir, k))
+	if err != nil {
+		return 0, false
+	}
+	defer f.Close()
+
+	n, err := f.ReadAt(p, off-start)
+	if err != nil || n < len(p) {
+		return 0, false
+	}
+	return n, true
+}
+
+// storeFooter persists a file's tail region once. start is the absolute offset of body[0]
+// (= size - footerRegionFor(size), computed by the engine, which fetches the whole region
+// in one GET on the first footer miss). Best-effort, same contract as maybeStore.
+func (c *probeCache) storeFooter(hash string, fileID int, start int64, body []byte) {
+	if start < 0 || len(body) == 0 {
+		return
+	}
+	k := c.footerKey(hash, fileID)
+
+	c.mu.Lock()
+	if _, exists := c.sizes[k]; exists {
+		c.mu.Unlock()
+		return
+	}
+	c.mu.Unlock()
+
+	tmp := filepath.Join(c.dir, k+".tmp")
+	if err := os.WriteFile(tmp, body, 0o644); err != nil {
+		return
+	}
+	final := filepath.Join(c.dir, k)
+	if err := os.Rename(tmp, final); err != nil {
+		_ = os.Remove(tmp)
+		return
+	}
+
+	c.mu.Lock()
+	c.sizes[k] = int64(len(body))
+	c.footStarts[k] = start
+	c.order = append(c.order, k)
+	c.totalBytes += int64(len(body))
+	c.evictLocked()
+	c.mu.Unlock()
+}
+
 // evictLocked drops oldest entries until total size is within budget. Caller holds c.mu.
 func (c *probeCache) evictLocked() {
 	for c.totalBytes > c.maxBytes && len(c.order) > 0 {
@@ -157,6 +258,7 @@ func (c *probeCache) evictLocked() {
 		if sz, ok := c.sizes[oldest]; ok {
 			c.totalBytes -= sz
 			delete(c.sizes, oldest)
+			delete(c.footStarts, oldest)
 			_ = os.Remove(filepath.Join(c.dir, oldest))
 		}
 	}
