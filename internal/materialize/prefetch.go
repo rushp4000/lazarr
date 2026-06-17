@@ -5,15 +5,11 @@ import (
 	"sync"
 )
 
-// chunkSize is the aligned window unit for the readahead cache. It matches the FUSE
-// MaxWrite/max_read (1 MiB), so a kernel read maps to 1-2 chunks.
-const chunkSize int64 = 1 << 20
-
 // chunkKey identifies one cached window of one file.
 type chunkKey struct {
 	hash   string
 	fileID int
-	idx    int64 // chunk index = offset / chunkSize
+	idx    int64 // chunk index = offset / p.chunkSize
 }
 
 // streamKey identifies one logical open stream for sequential-pattern tracking.
@@ -37,13 +33,14 @@ type streamState struct {
 // globally) and up to N MiB of discarded transfer when a viewer stops/seeks, which
 // counts against TorBox's rolling bandwidth — keep N modest (4-8).
 type prefetcher struct {
-	mu       sync.Mutex
-	cache    map[chunkKey][]byte
-	order    []chunkKey // FIFO eviction order
-	inflight map[chunkKey]chan struct{}
-	streams  map[streamKey]*streamState
-	windows  int // prefetch depth (config policy.readahead_windows)
-	capacity int // max cached chunks (global bound)
+	mu        sync.Mutex
+	cache     map[chunkKey][]byte
+	order     []chunkKey // FIFO eviction order
+	inflight  map[chunkKey]chan struct{}
+	streams   map[streamKey]*streamState
+	windows   int   // prefetch depth (config policy.readahead_windows)
+	capacity  int   // max cached chunks (global bound)
+	chunkSize int64 // bytes per readahead window (config policy.readahead_chunk_mib × 1 MiB)
 
 	// sem caps CONCURRENT background fetches. TorBox's CDN 429s parallel bursts
 	// (observed live at ~18 MB/s with unbounded parallelism); three in-flight
@@ -55,19 +52,21 @@ type prefetcher struct {
 	fetch func(ctx context.Context, ent *entry, fileID int, buf []byte, off int64) (int, error)
 }
 
-func newPrefetcher(windows int, fetch func(ctx context.Context, ent *entry, fileID int, buf []byte, off int64) (int, error)) *prefetcher {
+func newPrefetcher(windows int, chunkMiB int, fetch func(ctx context.Context, ent *entry, fileID int, buf []byte, off int64) (int, error)) *prefetcher {
 	conc := 3
 	if windows < conc {
 		conc = windows
 	}
+	cs := int64(chunkMiB) << 20
 	return &prefetcher{
-		cache:    make(map[chunkKey][]byte),
-		inflight: make(map[chunkKey]chan struct{}),
-		streams:  make(map[streamKey]*streamState),
-		windows:  windows,
-		capacity: windows * 8, // e.g. 4 windows -> 32 MiB ceiling across all streams
-		sem:      make(chan struct{}, conc),
-		fetch:    fetch,
+		cache:     make(map[chunkKey][]byte),
+		inflight:  make(map[chunkKey]chan struct{}),
+		streams:   make(map[streamKey]*streamState),
+		windows:   windows,
+		capacity:  windows * 8,
+		chunkSize: cs,
+		sem:       make(chan struct{}, conc),
+		fetch:     fetch,
 	}
 }
 
@@ -80,8 +79,8 @@ func (p *prefetcher) read(ctx context.Context, m *materializer, ent *entry, file
 
 	for n < len(dst) {
 		cur := off + int64(n)
-		idx := cur / chunkSize
-		inner := cur - idx*chunkSize
+		idx := cur / p.chunkSize
+		inner := cur - idx*p.chunkSize
 
 		data, err := p.getChunk(ctx, ent, fileID, idx)
 		if err != nil {
@@ -95,7 +94,7 @@ func (p *prefetcher) read(ctx context.Context, m *materializer, ent *entry, file
 		}
 		c := copy(dst[n:], data[inner:])
 		n += c
-		if len(data) < int(chunkSize) {
+		if int64(len(data)) < p.chunkSize {
 			p.noteEOF(sk, idx)
 			break // short chunk = EOF
 		}
@@ -122,18 +121,18 @@ func (p *prefetcher) read(ctx context.Context, m *materializer, ent *entry, file
 	}
 
 	p.mu.Lock()
-	sequential := ok && off >= st.lastEnd-4*chunkSize && off <= st.lastEnd+chunkSize
+	sequential := ok && off >= st.lastEnd-4*p.chunkSize && off <= st.lastEnd+p.chunkSize
 	st.lastEnd = off + int64(n)
 	eofIdx := st.eofIdx
 	if st.size > 0 {
-		if lastChunk := (st.size - 1) / chunkSize; eofIdx < 0 || lastChunk+1 < eofIdx {
+		if lastChunk := (st.size - 1) / p.chunkSize; eofIdx < 0 || lastChunk+1 < eofIdx {
 			eofIdx = lastChunk + 1
 		}
 	}
 	p.mu.Unlock()
 
 	if sequential && p.windows > 0 && n > 0 {
-		lastIdx := (off + want - 1) / chunkSize
+		lastIdx := (off + want - 1) / p.chunkSize
 		for i := int64(1); i <= int64(p.windows); i++ {
 			idx := lastIdx + i
 			if eofIdx >= 0 && idx >= eofIdx {
@@ -183,8 +182,8 @@ func (p *prefetcher) getChunk(ctx context.Context, ent *entry, fileID int, idx i
 		p.inflight[key] = ch
 		p.mu.Unlock()
 
-		buf := make([]byte, chunkSize)
-		n, err := p.fetch(ctx, ent, fileID, buf, idx*chunkSize)
+		buf := make([]byte, p.chunkSize)
+		n, err := p.fetch(ctx, ent, fileID, buf, idx*p.chunkSize)
 
 		p.mu.Lock()
 		delete(p.inflight, key)
@@ -240,8 +239,8 @@ func (p *prefetcher) prefetchAsync(m *materializer, hash string, fileID int, idx
 			return // best-effort: the foreground read path reports real errors
 		}
 		defer m.unpin(hash)
-		buf := make([]byte, chunkSize)
-		n, err := p.fetch(ctx, ent, fileID, buf, idx*chunkSize)
+		buf := make([]byte, p.chunkSize)
+		n, err := p.fetch(ctx, ent, fileID, buf, idx*p.chunkSize)
 		if err != nil || n == 0 {
 			if err == nil {
 				p.noteEOF(streamKey{hash, fileID}, idx)
@@ -251,7 +250,7 @@ func (p *prefetcher) prefetchAsync(m *materializer, hash string, fileID int, idx
 		p.mu.Lock()
 		p.store(key, buf[:n])
 		p.mu.Unlock()
-		if n < int(chunkSize) {
+		if int64(n) < p.chunkSize {
 			p.noteEOF(streamKey{hash, fileID}, idx+1)
 		}
 	}()

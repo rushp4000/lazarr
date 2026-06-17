@@ -83,7 +83,7 @@ func TestReadAt_429RetryAfterHonored(t *testing.T) {
 func TestThrottleBreaker_PausesPrefetch(t *testing.T) {
 	store := newFakeStore()
 	tb := newFakeTorBox()
-	m, err := New(Deps{Store: store, TorBox: tb, Policy: config.Policy{ActiveSlots: 2, ReadaheadWindows: 4}})
+	m, err := New(Deps{Store: store, TorBox: tb, Policy: config.Policy{ActiveSlots: 2, ReadaheadWindows: 4, ReadaheadChunkMiB: 1}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +94,7 @@ func TestThrottleBreaker_PausesPrefetch(t *testing.T) {
 	m.SetNow(func() time.Time { return base })
 
 	var fetches atomic.Int32
-	pf := newPrefetcher(4, func(_ context.Context, _ *entry, _ int, _ []byte, _ int64) (int, error) {
+	pf := newPrefetcher(4, 1, func(_ context.Context, _ *entry, _ int, _ []byte, _ int64) (int, error) {
 		fetches.Add(1)
 		return 0, nil
 	})

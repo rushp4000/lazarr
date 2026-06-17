@@ -18,7 +18,7 @@ func engineWithReadahead(t *testing.T, content []byte, windows int) (*materializ
 	cdn := newFakeCDN(content)
 	tb.dlURLFn = func(id int64, fileID int) string { return cdn.url("ra", fileID) }
 
-	pol := config.Policy{ActiveSlots: 2, ReadaheadWindows: windows}
+	pol := config.Policy{ActiveSlots: 2, ReadaheadWindows: windows, ReadaheadChunkMiB: 1}
 	m, err := New(Deps{Store: store, TorBox: tb, Policy: pol})
 	if err != nil {
 		t.Fatalf("New: %v", err)

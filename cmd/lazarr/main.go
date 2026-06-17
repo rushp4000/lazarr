@@ -470,7 +470,8 @@ func (p *webuiProvider) GetSettings() webui.Settings {
 		OnCacheMiss:      effectiveCacheMiss(c.Policy.OnCacheMiss),
 		CacheWaitBudget:  c.Policy.CacheWaitBudget.D().String(),
 		MaxWaitDownloads: c.Policy.MaxWaitDownloads,
-		ReadaheadWindows: c.Policy.ReadaheadWindows,
+		ReadaheadWindows:  c.Policy.ReadaheadWindows,
+		ReadaheadChunkMiB: c.Policy.ReadaheadChunkMiB,
 		PUID:             c.Ownership.PUID,
 		PGID:             c.Ownership.PGID,
 		MetricsListen:    c.Metrics.Listen,
@@ -546,6 +547,7 @@ func (p *webuiProvider) SaveSettings(s webui.Settings) (bool, error) {
 	}
 	nc.Policy.MaxWaitDownloads = s.MaxWaitDownloads
 	nc.Policy.ReadaheadWindows = s.ReadaheadWindows
+	nc.Policy.ReadaheadChunkMiB = s.ReadaheadChunkMiB
 	nc.Ownership.PUID = s.PUID
 	nc.Ownership.PGID = s.PGID
 	nc.Metrics.Listen = s.MetricsListen
