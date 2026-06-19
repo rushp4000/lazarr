@@ -361,14 +361,27 @@ button.btn:disabled{opacity:.4;cursor:not-allowed}
         <span class="hint">"Wait" shows a real download bar in the arr; when the download finishes the copy is removed from your account (the content is now in TorBox's cache) and the import completes normally.</span>
       </div>
 
-      <label>Streaming speed (readahead)<small>How many 1&nbsp;MB pieces to fetch in parallel ahead of playback. Higher = faster streams but more wasted bandwidth when you stop or skip.</small></label>
+      <label>Readahead windows<small>How many pieces to fetch in parallel ahead of playback. Higher = faster streams but more wasted bandwidth when you stop or skip.</small></label>
       <div class="field">
         <select id="set-readahead">
           <option value="0">Off — single connection (~5–8 MB/s, light 1080p)</option>
-          <option value="2">Low — 2 ahead (~10–15 MB/s)</option>
-          <option value="4">Standard — 4 ahead (~20–30 MB/s, most 4K)</option>
+          <option value="2">Low — 2 ahead</option>
+          <option value="4">Standard — 4 ahead (most 4K)</option>
           <option value="6">High — 6 ahead</option>
           <option value="8">Max — 8 ahead (4K remux)</option>
+        </select>
+      </div>
+
+      <label>Readahead chunk size<small>Size of each readahead piece in MiB. Larger chunks = fewer CDN round-trips (higher throughput) but more RAM and wasted transfer on seek/stop.</small></label>
+      <div class="field">
+        <select id="set-readahead-chunk">
+          <option value="1">1 MiB (minimal RAM)</option>
+          <option value="2">2 MiB (default)</option>
+          <option value="4">4 MiB</option>
+          <option value="8">8 MiB</option>
+          <option value="16">16 MiB</option>
+          <option value="32">32 MiB</option>
+          <option value="64">64 MiB (TMC-style)</option>
         </select>
       </div>
 
@@ -923,6 +936,7 @@ async function loadSettings() {
   document.getElementById('set-waitmin').value = Math.max(1, Math.round(parseGoDurationToHours(s.cache_wait_budget || '15m') * 60));
   document.getElementById('set-waitmax').value = s.max_wait_downloads || 1;
   document.getElementById('set-readahead').value = String(s.readahead_windows ?? 4);
+  document.getElementById('set-readahead-chunk').value = String(s.readahead_chunk_mib ?? 2);
   toggleWaitRow();
   document.getElementById('set-loglevel').value = s.log_level || 'info';
   document.getElementById('set-qbit-listen').value = s.qbit_listen || '';
@@ -977,6 +991,7 @@ async function saveSettings() {
     cache_wait_budget: (parseInt(document.getElementById('set-waitmin').value, 10) || 15) + 'm',
     max_wait_downloads: parseInt(document.getElementById('set-waitmax').value, 10) || 1,
     readahead_windows: parseInt(document.getElementById('set-readahead').value, 10) || 0,
+    readahead_chunk_mib: parseInt(document.getElementById('set-readahead-chunk').value, 10) || 2,
     puid: parseInt(document.getElementById('set-puid').value, 10) || 0,
     pgid: parseInt(document.getElementById('set-pgid').value, 10) || 0,
     metrics_listen: document.getElementById('set-metrics-listen').value.trim(),

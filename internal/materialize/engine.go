@@ -195,7 +195,7 @@ func New(d Deps) (*materializer, error) {
 	}
 
 	if d.Policy.ReadaheadWindows > 0 {
-		m.pf = newPrefetcher(d.Policy.ReadaheadWindows,
+		m.pf = newPrefetcher(d.Policy.ReadaheadWindows, d.Policy.ReadaheadChunkMiB,
 			func(ctx context.Context, ent *entry, fileID int, buf []byte, off int64) (int, error) {
 				n, _, err := m.proxyRead(ctx, ent, fileID, buf, off)
 				return n, err

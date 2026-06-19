@@ -93,12 +93,17 @@ type Policy struct {
 	// while downloading). Overflow misses fall back to error state.
 	MaxWaitDownloads int `yaml:"max_wait_downloads"`
 
-	// ReadaheadWindows is the number of 1 MiB windows prefetched in parallel ahead
-	// of a sequential read (per open stream). 0 disables prefetch (each read is one
-	// serial CDN round-trip ≈ 5-8 MB/s). 4-8 is the 4K-streaming range; memory cost
-	// is ReadaheadWindows MiB per active stream and discarded prefetches count
-	// against TorBox bandwidth.
+	// ReadaheadWindows is the number of chunk-sized windows prefetched in parallel
+	// ahead of a sequential read (per open stream). 0 disables prefetch (each read
+	// is one serial CDN round-trip). 4-8 is the 4K-streaming range; memory cost is
+	// ReadaheadWindows × ReadaheadChunkMiB per active stream and discarded
+	// prefetches count against TorBox bandwidth.
 	ReadaheadWindows int `yaml:"readahead_windows"`
+
+	// ReadaheadChunkMiB is the size of each readahead window in MiB. Larger chunks
+	// mean fewer CDN round-trips (higher throughput) but more RAM and more wasted
+	// transfer on seek/stop. Range 1-64; default 2.
+	ReadaheadChunkMiB int `yaml:"readahead_chunk_mib"`
 }
 
 // Ownership controls the privilege model for the symlink tree (docs/05 §5).
@@ -165,7 +170,8 @@ func Default() *Config {
 			OnCacheMiss:      "error",
 			CacheWaitBudget:  Duration(15 * time.Minute),
 			MaxWaitDownloads: 1,
-			ReadaheadWindows: 4,
+			ReadaheadWindows:  4,
+			ReadaheadChunkMiB: 2,
 		},
 	}
 }
@@ -257,6 +263,9 @@ func (c *Config) validate() error {
 	}
 	if c.Policy.ReadaheadWindows < 0 || c.Policy.ReadaheadWindows > 32 {
 		return fmt.Errorf("readahead_windows (%d) must be 0..32", c.Policy.ReadaheadWindows)
+	}
+	if c.Policy.ReadaheadChunkMiB < 1 || c.Policy.ReadaheadChunkMiB > 64 {
+		return fmt.Errorf("readahead_chunk_mib (%d) must be 1..64", c.Policy.ReadaheadChunkMiB)
 	}
 
 	// (g) extra_cdn_hosts entries must look like real multi-label host suffixes

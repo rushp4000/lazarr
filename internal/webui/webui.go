@@ -100,7 +100,8 @@ type Settings struct {
 	OnCacheMiss      string `json:"on_cache_miss"`     // error | reject | wait
 	CacheWaitBudget  string `json:"cache_wait_budget"` // Go duration, e.g. "15m"
 	MaxWaitDownloads int    `json:"max_wait_downloads"`
-	ReadaheadWindows int    `json:"readahead_windows"` // 0=off; 4-8 for 4K streaming
+	ReadaheadWindows  int `json:"readahead_windows"`   // 0=off; 4-8 for 4K streaming
+	ReadaheadChunkMiB int `json:"readahead_chunk_mib"` // MiB per window; 1-64, default 2
 
 	PUID int `json:"puid"`
 	PGID int `json:"pgid"`
