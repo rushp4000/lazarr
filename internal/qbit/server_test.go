@@ -552,6 +552,28 @@ func TestTorrentsProperties(t *testing.T) {
 	assert.True(t, strings.HasPrefix(cp, "/data/symlinks/radarr_hin/"))
 }
 
+// TestTorrentsTrackers verifies /torrents/trackers returns an empty array.
+func TestTorrentsTrackers(t *testing.T) {
+	e := newTestEnv(false)
+
+	magnet := magnetURI(cachedHash, "Big+Buck+Bunny")
+	body, ct := formBody("urls", magnet, "category", "radarr_hin")
+	e.do("POST", "/api/v2/torrents/add", body, ct)
+
+	rec := e.do("GET", "/api/v2/torrents/trackers?hash="+cachedHash, nil, "")
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var trackers []any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &trackers))
+	assert.Len(t, trackers, 0)
+}
+
+func TestTorrentsTrackers_UnknownHash(t *testing.T) {
+	e := newTestEnv(false)
+	rec := e.do("GET", "/api/v2/torrents/trackers?hash="+uncachedHash, nil, "")
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
 // TestCategories verifies /torrents/categories returns configured categories.
 func TestCategories(t *testing.T) {
 	e := newTestEnv(false)

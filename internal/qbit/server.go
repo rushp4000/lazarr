@@ -59,6 +59,7 @@ func New(d Deps) Server {
 	mux.HandleFunc("POST /api/v2/torrents/createCategory", s.handleCreateCategory)
 	mux.HandleFunc("POST /api/v2/torrents/removeCategories", s.handleRemoveCategories)
 	mux.HandleFunc("POST /api/v2/torrents/setCategory", s.handleSetCategory)
+	mux.HandleFunc("GET /api/v2/torrents/trackers", s.handleTorrentsTrackers)
 	mux.HandleFunc("POST /api/v2/torrents/pause", s.handleNoop)
 	mux.HandleFunc("POST /api/v2/torrents/resume", s.handleNoop)
 	mux.HandleFunc("POST /api/v2/torrents/topPrio", s.handleNoop)
@@ -602,6 +603,22 @@ func (s *server) handleTorrentsFiles(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, result)
+}
+
+// ── torrents/trackers ─────────────────────────────────────────────────────────
+
+func (s *server) handleTorrentsTrackers(w http.ResponseWriter, r *http.Request) {
+	hash := strings.ToLower(r.URL.Query().Get("hash"))
+	if hash == "" {
+		http.Error(w, "missing hash", http.StatusBadRequest)
+		return
+	}
+	rel, _, err := s.deps.Store.GetRelease(hash)
+	if err != nil || rel == nil {
+		http.NotFound(w, r)
+		return
+	}
+	writeJSON(w, []any{})
 }
 
 // ── torrents/delete ───────────────────────────────────────────────────────────
