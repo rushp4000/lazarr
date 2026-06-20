@@ -410,11 +410,17 @@ func (s *server) releaseToInfoObj(r *catalog.Release, files []catalog.File) torr
 	eta := int64(0)
 	completionOn := r.AddedOn // we complete instantly
 
+	size := r.TotalSize
+
 	switch r.State {
 	case catalog.StateError:
 		state = "error"
 		progress = 0.0
 		amtLeft = r.TotalSize
+		if r.TotalSize == 0 {
+			size = 1
+			amtLeft = 1
+		}
 		completionOn = 0
 	case catalog.StateDownloading:
 		// on_cache_miss=wait: TorBox is fetching the torrent; show its real progress
@@ -435,13 +441,13 @@ func (s *server) releaseToInfoObj(r *catalog.Release, files []catalog.File) torr
 	return torrentInfoObj{
 		Hash:         r.Hash,
 		Name:         r.Name,
-		Size:         r.TotalSize,
+		Size:         size,
 		Progress:     progress,
 		State:        state,
 		Category:     r.Category,
 		SavePath:     sp,
 		ContentPath:  cp,
-		Completed:    r.TotalSize,
+		Completed:    size - amtLeft,
 		AmountLeft:   amtLeft,
 		CompletionOn: completionOn,
 		AddedOn:      r.AddedOn,

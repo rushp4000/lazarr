@@ -434,6 +434,11 @@ func TestAddUncachedDisallowed(t *testing.T) {
 	require.Len(t, infos, 1)
 	assert.Equal(t, "error", infos[0]["state"])
 	assert.InDelta(t, 0.0, infos[0]["progress"], 0.001)
+	// Synthetic non-zero size so arr stall detection sees "stuck at 0%"
+	// rather than "nothing to download" (size=0 is invisible to stall rules).
+	assert.Equal(t, float64(1), infos[0]["size"])
+	assert.Equal(t, float64(1), infos[0]["amount_left"])
+	assert.Equal(t, float64(0), infos[0]["completed"])
 }
 
 // TestAddUncachedAllowed verifies AllowUncached=true falls back to TorrentInfo.
