@@ -416,6 +416,16 @@ func TestControlDelete_PostsCorrectJSON(t *testing.T) {
 	assert.Equal(t, "Bearer "+fakeAPIKey, ah.sawAuth)
 }
 
+func TestControlDelete_ArrayDetail(t *testing.T) {
+	fixture := readFixture(t, "controltorrent_delete_array_detail.json")
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		jsonResp(w, fixture)
+	})
+
+	err := c.ControlDelete(7654321)
+	require.NoError(t, err, "array-valued detail must not cause unmarshal error")
+}
+
 // ---------------------------------------------------------------------------
 // MyList
 // ---------------------------------------------------------------------------

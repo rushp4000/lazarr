@@ -93,15 +93,34 @@ type client struct {
 
 // envelope is the outer TorBox response wrapper.
 // success may be bool or null in JSON (use json.RawMessage).
+// detail may be a string or an array of strings depending on the endpoint.
 type envelope struct {
 	Success json.RawMessage `json:"success"`
-	Detail  string          `json:"detail"`
+	Detail  json.RawMessage `json:"detail"`
 	Data    json.RawMessage `json:"data"`
 }
 
 // isSuccess returns true when the Success field is the JSON literal `true`.
 func (e envelope) isSuccess() bool {
 	return string(e.Success) == "true"
+}
+
+// detail extracts the Detail field as a string. TorBox may return detail as
+// either a JSON string or an array of strings (observed on controltorrent
+// delete responses). Both forms are handled; arrays are joined with "; ".
+func (e envelope) detail() string {
+	if e.Detail == nil || string(e.Detail) == "null" {
+		return ""
+	}
+	var s string
+	if json.Unmarshal(e.Detail, &s) == nil {
+		return s
+	}
+	var arr []string
+	if json.Unmarshal(e.Detail, &arr) == nil {
+		return strings.Join(arr, "; ")
+	}
+	return string(e.Detail)
 }
 
 // apiError is returned on non-2xx HTTP or success!=true.
@@ -238,8 +257,8 @@ func (c *client) doRequest(
 		if slices.Contains(constants.LinkRefreshStatuses, statusCode) {
 			detail := "presigned link returned HTTP " + strconv.Itoa(statusCode)
 			var env envelope
-			if json.NewDecoder(resp.Body).Decode(&env) == nil && env.Detail != "" {
-				detail = env.Detail
+			if json.NewDecoder(resp.Body).Decode(&env) == nil && env.detail() != "" {
+				detail = env.detail()
 			}
 			return envelope{}, statusCode, &apiError{StatusCode: statusCode, Detail: detail}
 		}
@@ -259,7 +278,7 @@ func (c *client) doRequest(
 
 		// Non-2xx (but not in retry/link-refresh ranges).
 		if statusCode >= 400 {
-			return envelope{}, statusCode, &apiError{StatusCode: statusCode, Detail: env.Detail}
+			return envelope{}, statusCode, &apiError{StatusCode: statusCode, Detail: env.detail()}
 		}
 
 		// 2xx but success != true (e.g. rate limit: success:null).
@@ -382,20 +401,20 @@ func (c *client) CreateTorrent(magnet string, addOnlyIfCached bool) (int64, stri
 
 	// Rate-limited: success == null and detail contains "60 per 1 hour".
 	if !env.isSuccess() {
-		if strings.Contains(env.Detail, "60 per 1 hour") {
+		if strings.Contains(env.detail(), "60 per 1 hour") {
 			return 0, "", ErrRateLimited
 		}
 		// Queued upstream reported in a 2xx envelope (success != true) — same meaning
 		// as the HTTP 400 form mapped above.
-		if detailAlreadyQueued(env.Detail) {
+		if detailAlreadyQueued(env.detail()) {
 			return 0, "", ErrAlreadyQueued
 		}
 		// Dead-cache: a cached-only add whose hash is no longer cached / not found.
 		// Surface the typed sentinel so the engine can mark the release errored.
-		if addOnlyIfCached && detailNotFound(env.Detail) {
+		if addOnlyIfCached && detailNotFound(env.detail()) {
 			return 0, "", ErrNotFound
 		}
-		return 0, "", &apiError{Detail: env.Detail}
+		return 0, "", &apiError{Detail: env.detail()}
 	}
 
 	var data struct {
@@ -486,7 +505,7 @@ func (c *client) ControlDelete(torrentID int64) error {
 		return fmt.Errorf("torbox: controltorrent delete: %w", err)
 	}
 	if !env.isSuccess() {
-		return &apiError{Detail: env.Detail}
+		return &apiError{Detail: env.detail()}
 	}
 	return nil
 }
