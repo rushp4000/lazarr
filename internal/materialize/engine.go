@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -649,7 +650,7 @@ func (m *materializer) materialize(ctx context.Context, hash string) (*entry, er
 		return nil, err
 	}
 
-	id, _, err := m.tb.CreateTorrent(rel.Magnet, !m.policy.AllowUncached)
+	id, _, err := m.tb.CreateTorrent(createMagnet(rel), !m.policy.AllowUncached)
 	if err != nil {
 		// Release the slot we took; the add did not land.
 		m.releaseSlot()
@@ -998,6 +999,20 @@ func short(hash string) string {
 		return hash[:12]
 	}
 	return hash
+}
+
+// createMagnet returns the magnet string to submit to TorBox CreateTorrent for a
+// release. Grabs that arrived as a magnet (e.g. Torrentio) keep their original,
+// tracker-rich magnet — better peer discovery for uncached adds. Grabs that arrived
+// as a .torrent file (e.g. Nyaa, AnimeTosho — most anime) have no stored magnet, so
+// we synthesize a bare-btih magnet from the infohash. TorBox resolves a cached torrent
+// by hash alone, so this is sufficient for the cached-only path and gives uncached
+// adds a valid magnet to work from.
+func createMagnet(rel *catalog.Release) string {
+	if strings.HasPrefix(strings.TrimSpace(rel.Magnet), "magnet:") {
+		return rel.Magnet
+	}
+	return "magnet:?xt=urn:btih:" + rel.Hash
 }
 
 // isNotCached reports whether a CreateTorrent error indicates the item is not cached on
