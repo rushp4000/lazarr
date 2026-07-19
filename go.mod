@@ -1,6 +1,6 @@
 module github.com/rushp4000/lazarr
 
-go 1.26.4
+go 1.26.5
 
 require (
 	github.com/hanwen/go-fuse/v2 v2.10.1
